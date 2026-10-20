@@ -43,7 +43,7 @@ Section: devel
 Priority: optional
 Architecture: amd64
 Installed-Size: $tamanho
-Depends: libc6 (>= 2.39), libxkbcommon0, libwayland-client0 | libx11-6, libfontconfig1
+Depends: libc6 (>= 2.43), libxkbcommon0, libwayland-client0 | libx11-6, libfontconfig1
 Recommends: libvulkan1 | libgl1, git
 Maintainer: FeatherWorks <https://github.com/feather-works>
 Homepage: https://github.com/feather-works/feathercode
