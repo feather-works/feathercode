@@ -5,6 +5,11 @@ use std::path::{Path, PathBuf};
 // shortcut: lista fixa em vez de ler o .gitignore; trocar pelo crate `ignore` quando incomodar.
 const IGNORADAS: [&str; 4] = [".git", "target", "node_modules", ".~lock"];
 
+/// Pasta ou arquivo que a árvore e a busca pulam.
+pub fn ignorada(nome: &str) -> bool {
+    IGNORADAS.iter().any(|i| nome.starts_with(i))
+}
+
 pub struct Arvore {
     pub raiz: PathBuf,
     abertas: HashSet<PathBuf>,
@@ -34,11 +39,7 @@ impl Arvore {
             .into_iter()
             .flatten()
             .flatten()
-            .filter(|e| {
-                !IGNORADAS
-                    .iter()
-                    .any(|i| e.file_name().to_string_lossy().starts_with(i))
-            })
+            .filter(|e| !ignorada(&e.file_name().to_string_lossy()))
             .map(|e| (e.path(), e.file_type().is_ok_and(|t| t.is_dir())))
             .collect();
         itens.sort_by_key(|(p, pasta)| {

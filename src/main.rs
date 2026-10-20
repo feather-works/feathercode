@@ -4,6 +4,7 @@ mod arvore;
 mod config;
 mod inicio;
 mod modelos;
+mod paineis;
 
 use agente::{Item, Resposta, Sinal};
 use feather_ui::cromo;
@@ -22,6 +23,7 @@ use iced::{
     font, highlighter, keyboard, window, Alignment, Background, Border, Color, Element, Font,
     Length, Size, Subscription, Task,
 };
+use paineis::Lado;
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -151,6 +153,18 @@ enum Msg {
     Minimizar,
     Maximizar,
     Fechar,
+    Lado(Lado),
+    AlternarAgente,
+    AlternarTerminal,
+    LimparTerminal,
+    Busca(String),
+    BuscarAgora,
+    Achados(Vec<paineis::Achado>),
+    IrPara(PathBuf, usize),
+    GitAtualizar,
+    Git(Result<Vec<(String, PathBuf)>, String>),
+    Menu(Option<usize>),
+    TemaCodigo(usize),
 }
 
 struct Code {
@@ -185,6 +199,15 @@ struct Code {
     tamanho: Size,
     janela: Option<window::Id>,
     ultimo_clique_barra: Option<std::time::Instant>,
+    /// Painel ao lado do trilho; `None` = recolhido.
+    lado: Option<Lado>,
+    agente_aberto: bool,
+    terminal_aberto: bool,
+    busca: String,
+    achados: Option<Vec<paineis::Achado>>,
+    buscando: bool,
+    git: Option<Result<Vec<(String, PathBuf)>, String>>,
+    menu: Option<usize>,
 }
 
 impl Code {
@@ -229,12 +252,27 @@ impl Code {
             tamanho: Size::new(1380.0, 860.0),
             janela: None,
             ultimo_clique_barra: None,
+            lado: Some(Lado::Explorador),
+            agente_aberto: true,
+            terminal_aberto: true,
+            busca: String::new(),
+            achados: None,
+            buscando: false,
+            git: None,
+            menu: None,
         };
         let mut code = code;
         // Modo de captura: FEATHERCODE_CAPTURAR=foto.png fotografa a janela e fecha;
         // FEATHERCODE_CAPTURAR_ARQUIVO abre um arquivo e FEATHERCODE_CAPTURAR_EXEMPLO=1 põe uma conversa de exemplo.
         if let Some(arquivo) = std::env::var_os("FEATHERCODE_CAPTURAR_ARQUIVO") {
             let _ = code.update(Msg::AbrirArquivo(code.arvore.raiz.join(arquivo)));
+        }
+        // FEATHERCODE_CAPTURAR_MENU=1 deixa o menu Exibir aberto na foto.
+        if let Some(i) = std::env::var("FEATHERCODE_CAPTURAR_MENU")
+            .ok()
+            .and_then(|v| v.parse().ok())
+        {
+            code.menu = Some(i);
         }
         if std::env::var_os("FEATHERCODE_CAPTURAR_EXEMPLO").is_some() {
             code.itens = agente::exemplo();
@@ -254,6 +292,12 @@ impl Code {
         let teclas = keyboard::on_key_press(|tecla, m| match tecla.as_ref() {
             keyboard::Key::Character("s") if m.command() => Some(Msg::Salvar),
             keyboard::Key::Character("o") if m.command() => Some(Msg::AbrirPasta),
+            keyboard::Key::Character("b") if m.command() => Some(Msg::Lado(Lado::Explorador)),
+            keyboard::Key::Character("j") if m.command() => Some(Msg::AlternarTerminal),
+            keyboard::Key::Character("f" | "F") if m.command() && m.shift() => {
+                Some(Msg::Lado(Lado::Buscar))
+            }
+            keyboard::Key::Named(keyboard::key::Named::Escape) => Some(Msg::Menu(None)),
             _ => None,
         });
         let mut subs = vec![
@@ -280,6 +324,18 @@ impl Code {
         self.proximo_controle += 1;
         let linha = agente::controle(self.proximo_controle, pedido);
         self.enviar(linha);
+    }
+
+    fn tema_codigo(&self) -> highlighter::Theme {
+        match self
+            .config
+            .tema_codigo
+            .and_then(|i| highlighter::Theme::ALL.get(i))
+        {
+            Some(t) => *t,
+            None if tema::escuro() => highlighter::Theme::Base16Ocean,
+            None => highlighter::Theme::InspiredGitHub,
+        }
     }
 
     fn aba(&self) -> Option<&Aba> {
@@ -370,11 +426,93 @@ impl Code {
         self.ativa = 0;
         self.inicio = false;
         self.aviso.clear();
+        self.achados = None;
+        self.git = None;
         self.update(Msg::NovaConversa)
     }
 
     fn update(&mut self, msg: Msg) -> Task<Msg> {
+        // Escolher qualquer coisa fecha o menu; o que chega sozinho (agente, git, busca) não.
+        if !matches!(
+            msg,
+            Msg::Menu(_)
+                | Msg::Janela(_)
+                | Msg::Capturar
+                | Msg::Capturado(_)
+                | Msg::Agente(_)
+                | Msg::Tamanho(_)
+                | Msg::Rodou(_)
+                | Msg::Git(_)
+                | Msg::Achados(_)
+                | Msg::Ini(inicio::Ini::ClaudeVersao(_))
+        ) {
+            self.menu = None;
+        }
         match msg {
+            Msg::Menu(m) => self.menu = m,
+            Msg::Lado(l) => {
+                self.lado = if self.lado == Some(l) && l != Lado::Buscar {
+                    None
+                } else {
+                    Some(l)
+                };
+                match self.lado {
+                    Some(Lado::Buscar) => return text_input::focus(text_input::Id::new("busca")),
+                    Some(Lado::Git) => return self.update(Msg::GitAtualizar),
+                    _ => {}
+                }
+            }
+            Msg::AlternarAgente => self.agente_aberto = !self.agente_aberto,
+            Msg::AlternarTerminal => self.terminal_aberto = !self.terminal_aberto,
+            Msg::LimparTerminal => self.saida.clear(),
+            Msg::TemaCodigo(i) => {
+                self.config.tema_codigo = Some(i);
+                self.config.gravar();
+            }
+            Msg::Busca(b) => self.busca = b,
+            Msg::BuscarAgora => {
+                if self.busca.trim().is_empty() || self.buscando {
+                    return Task::none();
+                }
+                self.buscando = true;
+                let (raiz, termo) = (self.arvore.raiz.clone(), self.busca.trim().to_string());
+                return Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || paineis::buscar(&raiz, &termo))
+                            .await
+                            .unwrap_or_default()
+                    },
+                    Msg::Achados,
+                );
+            }
+            Msg::Achados(v) => {
+                self.buscando = false;
+                self.achados = Some(v);
+            }
+            Msg::IrPara(p, linha) => {
+                let abrir = self.update(Msg::AbrirArquivo(p));
+                if let Some(aba) = self.abas.get_mut(self.ativa) {
+                    aba.conteudo.perform(text_editor::Action::Move(
+                        text_editor::Motion::DocumentStart,
+                    ));
+                    for _ in 0..linha {
+                        aba.conteudo
+                            .perform(text_editor::Action::Move(text_editor::Motion::Down));
+                    }
+                }
+                let y = (linha as f32 * ALTURA_LINHA - 120.0).max(0.0);
+                return Task::batch([
+                    abrir,
+                    scrollable::scroll_to(
+                        scrollable::Id::new("editor"),
+                        scrollable::AbsoluteOffset { x: 0.0, y },
+                    ),
+                ]);
+            }
+            Msg::GitAtualizar => {
+                return Task::perform(paineis::status_git(self.arvore.raiz.clone()), Msg::Git)
+            }
+            Msg::Git(r) => self.git = Some(r),
             Msg::AbrirPasta => {
                 return Task::perform(
                     rfd::AsyncFileDialog::new()
@@ -420,6 +558,16 @@ impl Code {
                         }
                     }
                 }
+            }
+            // O text_editor fica com a altura toda do texto; a roda do mouse vira rolagem do scrollable de fora.
+            Msg::Editar(text_editor::Action::Scroll { lines }) => {
+                return scrollable::scroll_by(
+                    scrollable::Id::new("editor"),
+                    scrollable::AbsoluteOffset {
+                        x: 0.0,
+                        y: lines as f32 * ALTURA_LINHA,
+                    },
+                );
             }
             Msg::Editar(acao) => {
                 if let Some(aba) = self.abas.get_mut(self.ativa) {
@@ -632,8 +780,17 @@ impl Code {
         };
         let nome = container(
             row![
-                pena(27.0),
-                text("FeatherCode").size(13).font(NEGRITO),
+                container(
+                    row![pena(27.0), text("FeatherCode").size(13).font(NEGRITO)]
+                        .spacing(10)
+                        .align_y(Alignment::Center)
+                )
+                .width(paineis::LARGURA_MARCA),
+                if self.inicio {
+                    Space::with_width(0).into()
+                } else {
+                    self.menus_view()
+                },
                 text(pasta).size(13).color(COR_TEXTO_MUTED()),
                 horizontal_space(),
                 voltar,
@@ -676,21 +833,25 @@ impl Code {
                 .into(),
             );
         }
-        let meio = row![
-            self.arvore_view(),
-            linha_vertical(),
-            column![
-                self.abas_view(),
-                self.editor_view(),
-                linha_horizontal(),
-                self.terminal_view()
-            ]
-            .width(Length::Fill),
-            linha_vertical(),
-            self.agente_view(),
-        ]
-        .height(Length::Fill);
-        cromo::moldura_janela(column![barra, meio, linha_horizontal(), self.status_view()].into())
+        let mut centro = column![self.abas_view(), self.editor_view()].width(Length::Fill);
+        if self.terminal_aberto {
+            centro = centro.push(linha_horizontal()).push(self.terminal_view());
+        }
+        let mut meio = row![self.trilho_view(), linha_vertical()].height(Length::Fill);
+        if let Some(lado) = self.lado_view() {
+            meio = meio.push(lado).push(linha_vertical());
+        }
+        meio = meio.push(centro);
+        if self.agente_aberto {
+            meio = meio.push(linha_vertical()).push(self.agente_view());
+        }
+        let janela: Element<Msg> =
+            column![barra, meio, linha_horizontal(), self.status_view()].into();
+        let janela = match self.menu_aberto_view() {
+            Some(menu) => stack![janela, menu].into(),
+            None => janela,
+        };
+        cromo::moldura_janela(janela)
     }
 
     fn arvore_view(&self) -> Element<'_, Msg> {
@@ -829,11 +990,28 @@ impl Code {
         let total = aba.conteudo.line_count().max(1);
         let (linha_cursor, _) = aba.conteudo.cursor_position();
         let calha_px = total.to_string().len().max(2) as f32 * LARGURA_CARACTERE + 28.0;
-        let visivel_x = self.tamanho.width - LARGURA_ARVORE - LARGURA_AGENTE - calha_px - 4.0;
+        let visivel_x = self.tamanho.width
+            - paineis::LARGURA_TRILHO
+            - if self.lado.is_some() {
+                LARGURA_ARVORE
+            } else {
+                0.0
+            }
+            - if self.agente_aberto {
+                LARGURA_AGENTE
+            } else {
+                0.0
+            }
+            - calha_px
+            - 6.0;
         let visivel_y = self.tamanho.height
             - cromo::BARRA_ALTURA
             - ALTURA_ABAS
-            - ALTURA_TERMINAL
+            - if self.terminal_aberto {
+                ALTURA_TERMINAL
+            } else {
+                0.0
+            }
             - ALTURA_STATUS
             - 4.0;
         let largura = (aba.maior as f32 * LARGURA_CARACTERE + 2.0 * MARGEM_H + 32.0).max(visivel_x);
@@ -843,11 +1021,7 @@ impl Code {
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("txt");
-        let cores = if tema::escuro() {
-            highlighter::Theme::Base16Ocean
-        } else {
-            highlighter::Theme::InspiredGitHub
-        };
+        let cores = self.tema_codigo();
         let editor = text_editor(&aba.conteudo)
             .on_action(Msg::Editar)
             .font(MONO)
@@ -880,6 +1054,7 @@ impl Code {
         let conteudo = row![calha(total, linha_cursor + 1, calha_px, altura), horizontal];
         container(
             tema::rolagem(conteudo)
+                .id(scrollable::Id::new("editor"))
                 .height(Length::Fill)
                 .width(Length::Fill)
                 .style(rolagem_discreta),
