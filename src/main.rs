@@ -1194,11 +1194,7 @@ impl Code {
         let calha_px = total.to_string().len().max(2) as f32 * LARGURA_CARACTERE + 28.0;
         let visivel_x = self.tamanho.width
             - paineis::LARGURA_TRILHO
-            - if self.lado.is_some() {
-                LARGURA_ARVORE
-            } else {
-                0.0
-            }
+            - self.largura_lado()
             - if self.agente_aberto {
                 LARGURA_AGENTE
             } else {
