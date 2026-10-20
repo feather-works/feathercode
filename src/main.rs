@@ -48,7 +48,7 @@ const MARGEM_H: f32 = 12.0;
 
 fn main() -> iced::Result {
     let config = config::Config::ler();
-    tema::definir_tema(config.escuro, ROXO);
+    tema::definir_tema(config.tema.escuro(), ROXO);
     // Pena da suíte na cor de destaque do FeatherCode.
     marca::definir_marca(Produto::FeatherSheet, true);
     #[allow(unused_mut)]
@@ -142,15 +142,8 @@ enum Msg {
     Tamanho(Size),
     Capturar,
     Detalhes,
-    Inicio,
-    AbrirRecente(PathBuf),
-    AbrirArquivoRecente(PathBuf),
-    Tema(bool),
-    EscolherModelo(usize),
-    NomeProjeto(String),
-    EscolherOnde,
-    OndeEscolhido(Option<PathBuf>),
-    CriarProjeto,
+    IrInicio,
+    Ini(inicio::Ini),
     Link(markdown::Url),
     Capturado(window::Screenshot),
     Arrastar,
@@ -163,9 +156,7 @@ struct Code {
     /// Página inicial à mostra (nenhuma pasta aberta ainda, ou a pessoa voltou para ela).
     inicio: bool,
     config: config::Config,
-    modelo: Option<usize>,
-    nome_projeto: String,
-    erro_projeto: String,
+    ini: inicio::Estado,
     arvore: arvore::Arvore,
     abas: Vec<Aba>,
     ativa: usize,
@@ -212,9 +203,7 @@ impl Code {
         let code = Code {
             inicio,
             config,
-            modelo: None,
-            nome_projeto: String::new(),
-            erro_projeto: String::new(),
+            ini: inicio::Estado::novo(),
             arvore: arvore::Arvore::nova(pasta.clone()),
             abas: Vec::new(),
             ativa: 0,
@@ -250,7 +239,14 @@ impl Code {
             code.itens = agente::exemplo();
             code.uso = (Some(0.43), Some(0.63));
         }
-        (code, window::get_latest().map(Msg::Janela))
+        code.atualizar_recentes();
+        (
+            code,
+            Task::batch([
+                window::get_latest().map(Msg::Janela),
+                inicio::conferir_claude(),
+            ]),
+        )
     }
 
     fn subscription(&self) -> Subscription<Msg> {
@@ -361,7 +357,8 @@ impl Code {
         }
         if !p.is_dir() {
             self.aviso = format!("A pasta {} não existe mais.", p.display());
-            self.config.pastas.retain(|x| *x != p);
+            self.config.pastas.retain(|x| x.caminho != p);
+            self.atualizar_recentes();
             self.config.gravar();
             return Task::none();
         }
@@ -385,69 +382,15 @@ impl Code {
                     |h| Msg::PastaEscolhida(h.map(|h| h.path().to_path_buf())),
                 );
             }
-            Msg::PastaEscolhida(Some(p)) | Msg::AbrirRecente(p) => return self.abrir_pasta(p),
-            Msg::AbrirArquivoRecente(p) => {
-                let Some(pai) = p.parent().map(Path::to_path_buf) else {
-                    return Task::none();
-                };
-                if self.arvore.raiz != pai || self.inicio {
-                    let _ = self.abrir_pasta(pai);
-                }
-                return self.update(Msg::AbrirArquivo(p));
-            }
-            Msg::Inicio => {
+            Msg::PastaEscolhida(Some(p)) => return self.abrir_pasta(p),
+            Msg::Ini(m) => return self.atualizar_inicio(m),
+            Msg::IrInicio => {
                 if self.abas.iter().any(|a| a.sujo) {
                     self.aviso =
                         "Salve ou feche as abas com mudanças antes de voltar ao início.".into();
                 } else {
                     self.inicio = true;
-                }
-            }
-            Msg::Tema(escuro) => {
-                tema::definir_tema(escuro, ROXO);
-                self.config.escuro = escuro;
-                self.config.gravar();
-            }
-            Msg::EscolherModelo(i) => {
-                self.modelo = Some(i);
-                self.erro_projeto.clear();
-            }
-            Msg::NomeProjeto(n) => {
-                self.nome_projeto = n;
-                self.erro_projeto.clear();
-            }
-            Msg::EscolherOnde => {
-                let inicio = self.onde_criar();
-                return Task::perform(
-                    rfd::AsyncFileDialog::new()
-                        .set_title("Onde criar o projeto")
-                        .set_directory(inicio)
-                        .pick_folder(),
-                    |h| Msg::OndeEscolhido(h.map(|h| h.path().to_path_buf())),
-                );
-            }
-            Msg::OndeEscolhido(Some(p)) => {
-                self.config.pasta_projetos = Some(p);
-                self.config.gravar();
-            }
-            Msg::OndeEscolhido(None) => {}
-            Msg::CriarProjeto => {
-                let Some(m) = self.modelo.and_then(|i| modelos::MODELOS.get(i)) else {
-                    return Task::none();
-                };
-                match modelos::criar(m, &self.nome_projeto, &self.onde_criar()) {
-                    Ok(raiz) => {
-                        self.nome_projeto.clear();
-                        self.modelo = None;
-                        let abrir = self.abrir_pasta(raiz.clone());
-                        let leia = raiz.join("README.md");
-                        return if leia.is_file() {
-                            Task::batch([abrir, Task::done(Msg::AbrirArquivo(leia))])
-                        } else {
-                            abrir
-                        };
-                    }
-                    Err(e) => self.erro_projeto = e,
+                    self.atualizar_recentes();
                 }
             }
             Msg::PastaEscolhida(None) => {}
@@ -669,12 +612,21 @@ impl Code {
         let pasta = if self.inicio {
             String::new()
         } else {
-            self.arvore.raiz.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+            self.arvore
+                .raiz
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
         };
         let voltar: Element<Msg> = if self.inicio {
             Space::with_width(0).into()
         } else {
-            botao_texto(row![icone_traco("layout-grid", 14.0), text("Início").size(12)].spacing(6).align_y(Alignment::Center), Msg::Inicio)
+            botao_texto(
+                row![icone_traco("layout-grid", 14.0), text("Início").size(12)]
+                    .spacing(6)
+                    .align_y(Alignment::Center),
+                Msg::IrInicio,
+            )
         };
         let nome = container(
             row![
@@ -1281,7 +1233,13 @@ impl Code {
             None => (String::new(), String::new()),
         };
         let esquerda: Element<Msg> = if self.aviso.is_empty() {
-            text(if self.inicio { String::new() } else { self.ramo.clone().unwrap_or_default() }).size(11).into()
+            text(if self.inicio {
+                String::new()
+            } else {
+                self.ramo.clone().unwrap_or_default()
+            })
+            .size(11)
+            .into()
         } else {
             text(&self.aviso).size(11).color(COR_ERRO()).into()
         };

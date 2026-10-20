@@ -2,9 +2,46 @@
 //! indicado. `{nome}` vira o nome do pacote (com hífen) e `{modulo}` o nome com sublinhado.
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Tipo {
+    Desktop,
+    Terminal,
+    Api,
+    Site,
+    Automacao,
+    Biblioteca,
+}
+
+impl Tipo {
+    pub const TODOS: [Tipo; 6] = [
+        Tipo::Desktop,
+        Tipo::Terminal,
+        Tipo::Api,
+        Tipo::Site,
+        Tipo::Automacao,
+        Tipo::Biblioteca,
+    ];
+}
+
+impl std::fmt::Display for Tipo {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str(match self {
+            Tipo::Desktop => "Aplicativo desktop",
+            Tipo::Terminal => "Programa de terminal",
+            Tipo::Api => "API / servidor",
+            Tipo::Site => "Site",
+            Tipo::Automacao => "Automação",
+            Tipo::Biblioteca => "Biblioteca",
+        })
+    }
+}
+
 pub struct Modelo {
-    pub nome: &'static str,
-    pub linguagem: &'static str,
+    pub tipo: Tipo,
+    /// "RS", "PY", "WEB": o selo colorido da linguagem.
+    pub selo: &'static str,
+    /// O que aparece no menu Tecnologia.
+    pub tecnologia: &'static str,
     pub descricao: &'static str,
     /// Como rodar, mostrado no cartão e no README gerado.
     pub rodar: &'static str,
@@ -16,8 +53,9 @@ const GITIGNORE_RS: &str = "/target\n.env\n";
 
 pub const MODELOS: &[Modelo] = &[
     Modelo {
-        nome: "Aplicativo FeatherWorks",
-        linguagem: "Rust · Iced",
+        tipo: Tipo::Desktop,
+        selo: "RS",
+        tecnologia: "Rust · Iced (FeatherWorks)",
         descricao: "Workspace com motor sem interface (core) e janela Iced com o tema feather-ui (gui).",
         rodar: "cargo run -p {nome}-gui",
         arquivos: &[
@@ -31,8 +69,9 @@ pub const MODELOS: &[Modelo] = &[
         ],
     },
     Modelo {
-        nome: "Programa Rust",
-        linguagem: "Rust",
+        tipo: Tipo::Terminal,
+        selo: "RS",
+        tecnologia: "Rust",
         descricao: "Programa de terminal com um módulo separado e teste.",
         rodar: "cargo run",
         arquivos: &[
@@ -44,8 +83,9 @@ pub const MODELOS: &[Modelo] = &[
         ],
     },
     Modelo {
-        nome: "API REST em Rust",
-        linguagem: "Rust · Axum",
+        tipo: Tipo::Api,
+        selo: "RS",
+        tecnologia: "Rust · Axum",
         descricao: "Servidor HTTP com Axum e Tokio, rota de saúde e rota JSON.",
         rodar: "cargo run",
         arquivos: &[
@@ -57,8 +97,9 @@ pub const MODELOS: &[Modelo] = &[
         ],
     },
     Modelo {
-        nome: "Programa Python",
-        linguagem: "Python",
+        tipo: Tipo::Terminal,
+        selo: "PY",
+        tecnologia: "Python",
         descricao: "Script com módulos separados, pastas de dados e teste.",
         rodar: "python main.py",
         arquivos: &[
@@ -74,8 +115,9 @@ pub const MODELOS: &[Modelo] = &[
         ],
     },
     Modelo {
-        nome: "Pacote Python",
-        linguagem: "Python · pyproject",
+        tipo: Tipo::Biblioteca,
+        selo: "PY",
+        tecnologia: "Python (pyproject)",
         descricao: "Layout src/ com pyproject.toml, núcleo e serviços separados, para distribuir.",
         rodar: "python -m {modulo}",
         arquivos: &[
@@ -91,8 +133,9 @@ pub const MODELOS: &[Modelo] = &[
         ],
     },
     Modelo {
-        nome: "Site com FastAPI",
-        linguagem: "Python · FastAPI",
+        tipo: Tipo::Site,
+        selo: "PY",
+        tecnologia: "Python · FastAPI (com servidor)",
         descricao: "Servidor Python com rotas, páginas HTML (Jinja2) e arquivos estáticos.",
         rodar: "uvicorn app.main:app --reload",
         arquivos: &[
@@ -106,8 +149,9 @@ pub const MODELOS: &[Modelo] = &[
         ],
     },
     Modelo {
-        nome: "Site estático",
-        linguagem: "HTML · CSS · JS",
+        tipo: Tipo::Site,
+        selo: "WEB",
+        tecnologia: "HTML · CSS · JS (estático)",
         descricao: "Página sem servidor: estrutura, estilo e interatividade separados.",
         rodar: "python -m http.server",
         arquivos: &[
@@ -119,8 +163,9 @@ pub const MODELOS: &[Modelo] = &[
         ],
     },
     Modelo {
-        nome: "Automação Python",
-        linguagem: "Python",
+        tipo: Tipo::Automacao,
+        selo: "PY",
+        tecnologia: "Python",
         descricao: "Tarefas de baixar, transformar e gerar relatório, com config e logs.",
         rodar: "python -m src.automacao",
         arquivos: &[
@@ -137,6 +182,56 @@ pub const MODELOS: &[Modelo] = &[
             (".env.example", "TOKEN_API=\n"),
             (".gitignore", "__pycache__/\n.env\nlogs/*.log\ndata/output/*\n!data/output/.gitkeep\n"),
             ("README.md", "# {nome}\n\nRodar: `python -m src.automacao`\n\nAgendar no Linux (todo dia às 8h): `0 8 * * * cd /caminho/{nome} && python -m src.automacao`\n"),
+        ],
+    },
+    Modelo {
+        tipo: Tipo::Desktop,
+        selo: "PY",
+        tecnologia: "Python · PySide6",
+        descricao: "Janela Qt com a interface separada do núcleo, pronta para crescer em telas e serviços.",
+        rodar: "python -m app.main",
+        arquivos: &[
+            ("app/__init__.py", ""),
+            ("app/main.py", "from PySide6.QtWidgets import QApplication, QLabel, QMainWindow\n\nfrom app.core.engine import saudacao\n\n\ndef main():\n    app = QApplication([])\n    janela = QMainWindow()\n    janela.setWindowTitle(\"{nome}\")\n    janela.resize(1000, 700)\n    janela.setCentralWidget(QLabel(saudacao(\"mundo\")))\n    janela.show()\n    app.exec()\n\n\nif __name__ == \"__main__\":\n    main()\n"),
+            ("app/core/__init__.py", ""),
+            ("app/core/engine.py", "def saudacao(nome):\n    return f\"Olá, {nome}!\"\n"),
+            ("app/ui/__init__.py", ""),
+            ("assets/icons/.gitkeep", ""),
+            ("tests/test_engine.py", "from app.core.engine import saudacao\n\n\ndef test_saudacao():\n    assert saudacao(\"mundo\") == \"Olá, mundo!\"\n"),
+            ("requirements.txt", "PySide6\n"),
+            (".gitignore", GITIGNORE_PY),
+            ("README.md", "# {nome}\n\n```\npython -m pip install -r requirements.txt\npython -m app.main\n```\n"),
+        ],
+    },
+    Modelo {
+        tipo: Tipo::Biblioteca,
+        selo: "RS",
+        tecnologia: "Rust",
+        descricao: "Crate de biblioteca com teste e exemplo, para usar como dependência em outros projetos.",
+        rodar: "cargo test",
+        arquivos: &[
+            ("Cargo.toml", "[package]\nname = \"{nome}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n"),
+            (".gitignore", GITIGNORE_RS),
+            ("src/lib.rs", "//! {nome}: biblioteca.\n\n/// Soma dois números.\npub fn somar(a: i64, b: i64) -> i64 {\n    a + b\n}\n\n#[cfg(test)]\nmod testes {\n    #[test]\n    fn soma() {\n        assert_eq!(super::somar(2, 3), 5);\n    }\n}\n"),
+            ("examples/uso.rs", "fn main() {\n    println!(\"2 + 3 = {}\", {modulo}::somar(2, 3));\n}\n"),
+            ("README.md", "# {nome}\n\nTestar: `cargo test` · Exemplo: `cargo run --example uso`\n"),
+        ],
+    },
+    Modelo {
+        tipo: Tipo::Api,
+        selo: "PY",
+        tecnologia: "Python · FastAPI",
+        descricao: "API REST em Python com rotas separadas e documentação automática em /docs.",
+        rodar: "uvicorn app.main:app --reload",
+        arquivos: &[
+            ("app/__init__.py", ""),
+            ("app/main.py", "from fastapi import FastAPI\n\nfrom app.routes import itens\n\napp = FastAPI(title=\"{nome}\")\napp.include_router(itens.router)\n\n\n@app.get(\"/saude\")\ndef saude():\n    return {\"ok\": True}\n"),
+            ("app/routes/__init__.py", ""),
+            ("app/routes/itens.py", "from fastapi import APIRouter\n\nrouter = APIRouter(prefix=\"/itens\")\n\n\n@router.get(\"/\")\ndef listar():\n    return [{\"id\": 1, \"nome\": \"exemplo\"}]\n"),
+            ("requirements.txt", "fastapi\nuvicorn\n"),
+            (".env.example", "PORTA=8000\n"),
+            (".gitignore", GITIGNORE_PY),
+            ("README.md", "# {nome}\n\n```\npython -m pip install -r requirements.txt\nuvicorn app.main:app --reload\n```\n\nDocumentação: http://127.0.0.1:8000/docs\n"),
         ],
     },
 ];
@@ -164,6 +259,72 @@ pub fn nome_de_pacote(nome: &str) -> Result<String, &'static str> {
         return Err("Use letras sem acento, números e hífen, começando por uma letra.");
     }
     Ok(n)
+}
+
+/// Os modelos de um tipo, na ordem do menu Tecnologia.
+pub fn do_tipo(tipo: Tipo) -> impl Iterator<Item = (usize, &'static Modelo)> {
+    MODELOS
+        .iter()
+        .enumerate()
+        .filter(move |(_, m)| m.tipo == tipo)
+}
+
+impl Modelo {
+    /// Árvore de pastas que vai ser criada, como no `tree`.
+    pub fn estrutura(&self, nome: &str) -> String {
+        let pacote = nome_de_pacote(nome).unwrap_or_else(|_| "meu-projeto".into());
+        let modulo = pacote.replace('-', "_");
+        let mut caminhos: Vec<String> = self
+            .arquivos
+            .iter()
+            .map(|(c, _)| c.replace("{nome}", &pacote).replace("{modulo}", &modulo))
+            .collect();
+        caminhos.sort();
+        let mut linhas = vec![format!("{pacote}/")];
+        desenhar(
+            &caminhos.iter().map(|c| c.as_str()).collect::<Vec<_>>(),
+            "",
+            &mut linhas,
+        );
+        linhas.join("\n")
+    }
+}
+
+/// Desenha um nível: pastas primeiro (com o que tem dentro), depois arquivos.
+fn desenhar(caminhos: &[&str], prefixo: &str, linhas: &mut Vec<String>) {
+    let mut pastas: Vec<(&str, Vec<&str>)> = Vec::new();
+    let mut arquivos = Vec::new();
+    for c in caminhos {
+        match c.split_once('/') {
+            Some((pasta, resto)) => match pastas.iter_mut().find(|(p, _)| *p == pasta) {
+                Some((_, filhos)) => filhos.push(resto),
+                None => pastas.push((pasta, vec![resto])),
+            },
+            None => arquivos.push(*c),
+        }
+    }
+    let total = pastas.len() + arquivos.len();
+    let itens = pastas
+        .into_iter()
+        .map(|(p, f)| (p, Some(f)))
+        .chain(arquivos.into_iter().map(|a| (a, None)));
+    for (i, (nome, filhos)) in itens.enumerate() {
+        let ultimo = i + 1 == total;
+        let ramo = if ultimo { "└─ " } else { "├─ " };
+        match filhos {
+            // .gitkeep só existe para a pasta vazia ir junto: mostra a pasta, não o arquivo.
+            Some(f) if f == [".gitkeep"] => linhas.push(format!("{prefixo}{ramo}{nome}/")),
+            Some(f) => {
+                linhas.push(format!("{prefixo}{ramo}{nome}/"));
+                desenhar(
+                    &f,
+                    &format!("{prefixo}{}", if ultimo { "   " } else { "│  " }),
+                    linhas,
+                );
+            }
+            None => linhas.push(format!("{prefixo}{ramo}{nome}")),
+        }
+    }
 }
 
 /// Cria a pasta do projeto dentro de `onde`. Nunca escreve numa pasta que já existe.
@@ -197,6 +358,15 @@ mod testes {
     }
 
     #[test]
+    fn todo_tipo_tem_modelo_e_a_estrutura_desenha_a_arvore() {
+        for t in Tipo::TODOS {
+            assert!(do_tipo(t).next().is_some(), "{t} sem modelo");
+        }
+        let rust = MODELOS.iter().find(|m| m.tipo == Tipo::Terminal && m.selo == "RS").unwrap();
+        assert_eq!(rust.estrutura("Meu App"), "meu-app/\n├─ src/\n│  ├─ main.rs\n│  └─ processamento.rs\n├─ .gitignore\n├─ Cargo.toml\n└─ README.md");
+    }
+
+    #[test]
     fn todos_os_modelos_criam_os_arquivos_e_nao_sobrescrevem() {
         let onde = std::env::temp_dir().join(format!("feathercode-modelos-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&onde);
@@ -206,7 +376,7 @@ mod testes {
                 let c = c
                     .replace("{nome}", &format!("teste-{i}"))
                     .replace("{modulo}", &format!("teste_{i}"));
-                assert!(raiz.join(&c).is_file(), "{}: falta {c}", m.nome);
+                assert!(raiz.join(&c).is_file(), "{}: falta {c}", m.tecnologia);
             }
             assert!(!std::fs::read_to_string(raiz.join("README.md"))
                 .unwrap()
