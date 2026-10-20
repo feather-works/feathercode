@@ -1414,23 +1414,24 @@ impl Code {
             })
             .highlight(extensao, cores)
             .style(|_, _| text_editor::Style {
-                background: Background::Color(Color::TRANSPARENT),
+                background: Background::Color(COR_PAINEL()),
                 border: Border::default(),
                 icon: COR_TEXTO_MUTED(),
                 placeholder: COR_TEXTO_MUTED(),
                 value: COR_TEXTO(),
                 selection: COR_AZUL_FUNDO(),
             });
-        // Linha do cursor: faixa por baixo do texto, um pouco mais clara no tema escuro e mais
-        // escura no claro (a cor do texto, quase transparente, faz as duas coisas).
+        // Linha do cursor: faixa por cima do texto, um pouco mais clara no tema escuro e mais
+        // escura no claro (a cor do texto, quase transparente, faz as duas coisas). O editor fica
+        // na camada de baixo: numa camada de cima do stack, dentro do scrollable, o texto some.
         let faixa = column![
             Space::with_height(MARGEM_V + linha_cursor as f32 * ALTURA_LINHA),
             container(Space::new(Length::Fill, ALTURA_LINHA))
                 .width(Length::Fill)
-                .style(|_| fundo(COR_TEXTO().scale_alpha(0.06)))
+                .style(|_| fundo(COR_TEXTO().scale_alpha(0.05)))
         ]
         .width(largura);
-        let editor = stack![faixa, editor];
+        let editor = stack![editor, faixa];
         let horizontal = scrollable(editor)
             .style(rolagem_discreta)
             .direction(scrollable::Direction::Horizontal(
