@@ -369,8 +369,8 @@ pub const MENUS: [(&str, f32); 4] = [
     ("Terminal", 66.0),
     ("Agente", 58.0),
 ];
-/// Largura do bloco pena + "FeatherCode" antes dos menus.
-pub const LARGURA_MARCA: f32 = 122.0;
+/// Largura da pena antes dos menus.
+pub const LARGURA_MARCA: f32 = 30.0;
 
 impl Code {
     pub(crate) fn trilho_view(&self) -> Element<'_, Msg> {

@@ -973,12 +973,8 @@ impl Code {
         };
         let nome = container(
             row![
-                container(
-                    row![pena(27.0), text("FeatherCode").size(13).font(NEGRITO)]
-                        .spacing(10)
-                        .align_y(Alignment::Center)
-                )
-                .width(paineis::LARGURA_MARCA),
+                // Só a pena: o nome do app já está na janela, e o da pasta vem logo depois dos menus.
+                container(pena(27.0)).width(paineis::LARGURA_MARCA),
                 self.menus_view(),
                 text(pasta).size(13).color(COR_TEXTO_MUTED()),
                 horizontal_space(),
