@@ -685,7 +685,7 @@ impl Code {
         let cabecalho = column![
             pena(56.0),
             text("Bem-vindo ao FeatherCode").size(19).font(NEGRITO),
-            text("Três escolhas rápidas e você já começa.")
+            text("Duas escolhas rápidas e você já começa.")
                 .size(12)
                 .color(COR_TEXTO_MUTED()),
         ]
@@ -698,29 +698,6 @@ impl Code {
             miniatura(Tema::Sistema, self.config.tema)
         ]
         .spacing(8);
-        let onde = container(
-            row![
-                text(encurtar(&self.onde_criar()))
-                    .size(13)
-                    .width(Length::Fill),
-                link_pequeno("Escolher…", Msg::Ini(Ini::EscolherOnde))
-            ]
-            .align_y(Alignment::Center),
-        )
-        .padding(iced::Padding {
-            top: 3.0,
-            right: 4.0,
-            bottom: 3.0,
-            left: 10.0,
-        })
-        .style(|_| container::Style {
-            border: Border {
-                color: COR_BORDA(),
-                width: 1.0,
-                radius: 6.0.into(),
-            },
-            ..fundo(COR_PAINEL_FAIXA())
-        });
         let rodape = row![
             link_pequeno("Pular", Msg::Ini(Ini::Comecar)),
             horizontal_space(),
@@ -732,7 +709,6 @@ impl Code {
                 cabecalho,
                 passo("1", "Aparência", temas.into()),
                 passo("2", "Agente de IA", self.cartao_claude()),
-                passo("3", "Onde ficam seus projetos", onde.into()),
                 linha_horizontal(),
                 rodape,
             ]

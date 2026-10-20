@@ -1423,9 +1423,11 @@ fn linha_do_tempo(passos: Vec<Element<'_, Msg>>) -> Element<'_, Msg> {
 
 /// Números das linhas: três textos (antes, a linha do cursor, depois) com a mesma métrica do editor.
 fn calha<'a>(total: usize, linha_cursor: usize, largura: f32, altura: f32) -> Element<'a, Msg> {
+    // Mesma largura em todos: o Iced alinha o bloco pela linha mais larga, não linha a linha.
+    let largura_num = total.to_string().len();
     let numeros = |de: usize, ate: usize| {
         (de..=ate)
-            .map(|n| n.to_string())
+            .map(|n| format!("{n:>largura_num$}"))
             .collect::<Vec<_>>()
             .join("\n")
     };
@@ -1443,7 +1445,7 @@ fn calha<'a>(total: usize, linha_cursor: usize, largura: f32, altura: f32) -> El
     if linha_cursor > 1 {
         col = col.push(numero(numeros(1, linha_cursor - 1), COR_TEXTO_MUTED()));
     }
-    col = col.push(numero(linha_cursor.to_string(), COR_TEXTO()));
+    col = col.push(numero(numeros(linha_cursor, linha_cursor), COR_TEXTO()));
     if linha_cursor < total {
         col = col.push(numero(numeros(linha_cursor + 1, total), COR_TEXTO_MUTED()));
     }
