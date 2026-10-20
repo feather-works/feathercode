@@ -171,6 +171,10 @@ enum Msg {
     VerDiff(PathBuf),
     Diff(Result<paineis::Diff, String>),
     FecharDiff,
+    /// Clique num commit do gráfico: abre ou fecha a lista de arquivos dele.
+    AbrirCommit(String),
+    ArquivosCommit(Result<(String, Vec<(String, PathBuf)>), String>),
+    VerDiffCommit(String, PathBuf),
     /// pull, push ou fetch: rodam no terminal, que mostra a saída e pede a senha se precisar.
     GitRemoto(&'static str),
     MensagemCommit(String),
@@ -223,6 +227,8 @@ struct Code {
     mensagem_commit: String,
     /// Diferença aberta no lugar do editor (clique numa mudança do painel Git).
     diff: Option<paineis::Diff>,
+    /// Commit aberto no gráfico do Git: hash e arquivos mudados.
+    commit_aberto: Option<(String, Vec<(String, PathBuf)>)>,
     achados: Option<Vec<paineis::Achado>>,
     buscando: bool,
     git: Option<Result<paineis::EstadoGit, String>>,
@@ -283,6 +289,7 @@ impl Code {
             busca: String::new(),
             mensagem_commit: String::new(),
             diff: None,
+            commit_aberto: None,
             achados: None,
             buscando: false,
             git: None,
@@ -642,6 +649,24 @@ impl Code {
             Msg::Diff(Ok(d)) => self.diff = Some(d),
             Msg::Diff(Err(e)) => self.aviso = e,
             Msg::FecharDiff => self.diff = None,
+            Msg::AbrirCommit(h) => {
+                if self.commit_aberto.as_ref().is_some_and(|(a, _)| *a == h) {
+                    self.commit_aberto = None;
+                } else {
+                    return Task::perform(
+                        paineis::arquivos_do_commit(self.arvore.raiz.clone(), h),
+                        Msg::ArquivosCommit,
+                    );
+                }
+            }
+            Msg::ArquivosCommit(Ok(c)) => self.commit_aberto = Some(c),
+            Msg::ArquivosCommit(Err(e)) => self.aviso = e,
+            Msg::VerDiffCommit(h, p) => {
+                return Task::perform(
+                    paineis::diff_do_commit(self.arvore.raiz.clone(), h, p),
+                    Msg::Diff,
+                )
+            }
             Msg::MensagemCommit(t) => self.mensagem_commit = t,
             Msg::Commit => {
                 let msg = self.mensagem_commit.trim().to_string();
@@ -1297,13 +1322,23 @@ impl Code {
             })
             .highlight(extensao, cores)
             .style(|_, _| text_editor::Style {
-                background: Background::Color(COR_PAINEL()),
+                background: Background::Color(Color::TRANSPARENT),
                 border: Border::default(),
                 icon: COR_TEXTO_MUTED(),
                 placeholder: COR_TEXTO_MUTED(),
                 value: COR_TEXTO(),
                 selection: COR_AZUL_FUNDO(),
             });
+        // Linha do cursor: faixa por baixo do texto, um pouco mais clara no tema escuro e mais
+        // escura no claro (a cor do texto, quase transparente, faz as duas coisas).
+        let faixa = column![
+            Space::with_height(MARGEM_V + linha_cursor as f32 * ALTURA_LINHA),
+            container(Space::new(Length::Fill, ALTURA_LINHA))
+                .width(Length::Fill)
+                .style(|_| fundo(COR_TEXTO().scale_alpha(0.06)))
+        ]
+        .width(largura);
+        let editor = stack![faixa, editor];
         let horizontal = scrollable(editor)
             .style(rolagem_discreta)
             .direction(scrollable::Direction::Horizontal(
@@ -1335,8 +1370,11 @@ impl Code {
                 text(self.relativo(&d.caminho).display().to_string())
                     .size(13)
                     .font(NEGRITO),
-                text("alterações desde o último commit")
-                    .size(12)
+                text(match &d.commit {
+                    Some(h) => format!("no commit {h}"),
+                    None => "alterações desde o último commit".into(),
+                })
+                .size(12)
                     .color(COR_TEXTO_MUTED()),
                 text(format!("+{mais}")).size(12).font(MONO).color(VERDE),
                 text(format!("−{menos}")).size(12).font(MONO).color(COR_ERRO()),
@@ -1408,7 +1446,7 @@ impl Code {
         }
         let corpo: Element<Msg> = if d.linhas.is_empty() {
             container(
-                text("Sem diferença contra o último commit.")
+                text("Sem diferença de texto (arquivo binário ou vazio).")
                     .size(13)
                     .color(COR_TEXTO_MUTED()),
             )

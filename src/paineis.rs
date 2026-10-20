@@ -192,6 +192,8 @@ pub struct LinhaDiff {
 #[derive(Debug, Clone)]
 pub struct Diff {
     pub caminho: PathBuf,
+    /// Hash do commit mostrado; `None` é a mudança ainda não commitada.
+    pub commit: Option<String>,
     pub linhas: Vec<LinhaDiff>,
 }
 
@@ -222,8 +224,60 @@ pub async fn diff_git(raiz: PathBuf, caminho: PathBuf) -> Result<Diff, String> {
     }
     Ok(Diff {
         caminho,
+        commit: None,
         linhas: ler_diff(&texto),
     })
+}
+
+/// O que um commit mudou nesse arquivo (contra o primeiro pai, se for merge).
+pub async fn diff_do_commit(raiz: PathBuf, hash: String, caminho: PathBuf) -> Result<Diff, String> {
+    let saida = tokio::process::Command::new("git")
+        .args(["show", "--format=", "--diff-merges=first-parent", &hash, "--"])
+        .arg(&caminho)
+        .current_dir(&raiz)
+        .output()
+        .await
+        .map_err(|e| format!("Não deu para rodar o git: {e}"))?;
+    if !saida.status.success() {
+        return Err(String::from_utf8_lossy(&saida.stderr).trim().to_string());
+    }
+    Ok(Diff {
+        caminho,
+        commit: Some(hash),
+        linhas: ler_diff(&String::from_utf8_lossy(&saida.stdout)),
+    })
+}
+
+/// Arquivos mudados num commit, como em Mudanças: (sigla, caminho).
+pub async fn arquivos_do_commit(
+    raiz: PathBuf,
+    hash: String,
+) -> Result<(String, Vec<(String, PathBuf)>), String> {
+    let saida = tokio::process::Command::new("git")
+        .args(["show", "--format=", "--name-status", "--diff-merges=first-parent", &hash])
+        .current_dir(&raiz)
+        .output()
+        .await
+        .map_err(|e| format!("Não deu para rodar o git: {e}"))?;
+    if !saida.status.success() {
+        return Err(String::from_utf8_lossy(&saida.stderr).trim().to_string());
+    }
+    let arquivos = ler_name_status(&String::from_utf8_lossy(&saida.stdout))
+        .into_iter()
+        .map(|(sigla, p)| (sigla, raiz.join(p)))
+        .collect();
+    Ok((hash, arquivos))
+}
+
+/// "M\tsrc/a.rs" e "R100\tvelho\tnovo": a sigla é a letra, o caminho é o último campo.
+fn ler_name_status(s: &str) -> Vec<(String, String)> {
+    s.lines()
+        .filter_map(|l| {
+            let sigla = l.get(..1)?.to_string();
+            let caminho = l.rsplit('\t').next().filter(|_| l.contains('\t'))?;
+            Some((sigla, caminho.to_string()))
+        })
+        .collect()
 }
 
 fn ler_diff(s: &str) -> Vec<LinhaDiff> {
@@ -300,16 +354,11 @@ async fn mudancas_git(raiz: &Path) -> Result<Vec<(String, PathBuf)>, String> {
         .collect())
 }
 
-/// Ícone de ramo do Git (Tabler, MIT); o catálogo da feather-ui não tem.
-fn icone_git(tamanho: f32) -> iced::widget::Svg<'static> {
-    const SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#808080" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="7" cy="18" r="2"/><circle cx="7" cy="6" r="2"/><circle cx="17" cy="6" r="2"/><path d="M7 8v8"/><path d="M9 18h6a2 2 0 0 0 2-2v-5"/><path d="M14 14l3-3 3 3"/></svg>"##;
-    iced::widget::svg(iced::widget::svg::Handle::from_memory(SVG.as_bytes()))
-        .width(tamanho)
-        .height(tamanho)
-        .style(|_, _| iced::widget::svg::Style {
-            color: Some(COR_TEXTO()),
-        })
-}
+// Ícones do trilho (Tabler, MIT): o catálogo da feather-ui não tem estes. A cor vem do estilo.
+const ICONE_ARQUIVOS: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3v4a1 1 0 0 0 1 1h4"/><path d="M18 17h-7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4l5 5v7a2 2 0 0 1-2 2z"/><path d="M16 17v2a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2h2"/></svg>"##;
+const ICONE_BUSCA: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="10" r="7"/><path d="M21 21l-6-6"/></svg>"##;
+const ICONE_GIT: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="7" cy="18" r="2"/><circle cx="7" cy="6" r="2"/><circle cx="17" cy="6" r="2"/><path d="M7 8v8"/><path d="M9 18h6a2 2 0 0 0 2-2v-5"/><path d="M14 14l3-3 3 3"/></svg>"##;
+const ICONE_AGENTE: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M16 18a2 2 0 0 1 2 2a2 2 0 0 1 2-2a2 2 0 0 1-2-2a2 2 0 0 1-2 2zm0-12a2 2 0 0 1 2 2a2 2 0 0 1 2-2a2 2 0 0 1-2-2a2 2 0 0 1-2 2zm-7 12a6 6 0 0 1 6-6a6 6 0 0 1-6-6a6 6 0 0 1-6 6a6 6 0 0 1 6 6z"/></svg>"##;
 
 /// Itens de cada menu do topo: (rótulo, atalho, mensagem, marcado).
 type Item = (&'static str, &'static str, Msg, bool);
@@ -325,43 +374,45 @@ pub const LARGURA_MARCA: f32 = 122.0;
 
 impl Code {
     pub(crate) fn trilho_view(&self) -> Element<'_, Msg> {
-        let botao = |icone: Element<'static, Msg>,
+        // Como a barra de atividades do VS Code: ícone em traço, o ativo em cor de destaque
+        // com um filete à esquerda; nada de caixa preenchida.
+        let botao = |icone: &'static str,
                      dica: &'static str,
                      ativo: bool,
                      msg: Msg|
          -> Element<'static, Msg> {
-            let b = button(container(icone).center(28))
-                .on_press(msg)
-                .padding(4)
-                .style(move |_, s| button::Style {
-                    background: Some(
-                        (if ativo {
-                            COR_AZUL_FUNDO()
-                        } else if matches!(s, button::Status::Hovered) {
-                            COR_HOVER()
-                        } else {
-                            Color::TRANSPARENT
-                        })
-                        .into(),
-                    ),
-                    border: Border {
-                        radius: 7.0.into(),
-                        ..Default::default()
-                    },
+            let b = button(
+                container(
+                    iced::widget::svg(iced::widget::svg::Handle::from_memory(icone.as_bytes()))
+                        .width(22)
+                        .height(22)
+                        .style(move |_, s| iced::widget::svg::Style {
+                            color: Some(if ativo || matches!(s, iced::widget::svg::Status::Hovered) {
+                                if ativo { COR_AZUL_ACENTO() } else { COR_TEXTO() }
+                            } else {
+                                COR_TEXTO_MUTED()
+                            }),
+                        }),
+                )
+                .center(Length::Fill),
+            )
+            .on_press(msg)
+            .width(Length::Fill)
+            .height(44)
+            .padding(0)
+            .style(|_, _| button::Style::default());
+            let filete = container(Space::new(2, 24)).style(move |_| container::Style {
+                border: Border {
+                    radius: 1.0.into(),
                     ..Default::default()
-                });
+                },
+                ..fundo(if ativo { COR_AZUL_ACENTO() } else { Color::TRANSPARENT })
+            });
             tooltip(
-                b,
+                row![filete, b].align_y(Alignment::Center),
                 container(text(dica).size(12))
                     .padding([4, 8])
-                    .style(|_| container::Style {
-                        border: Border {
-                            color: COR_BORDA(),
-                            width: 1.0,
-                            radius: 6.0.into(),
-                        },
-                        ..fundo(COR_PAINEL())
-                    }),
+                    .style(tema::estilo_dica),
                 tooltip::Position::Right,
             )
             .into()
@@ -369,32 +420,26 @@ impl Code {
         let lado = self.lado;
         column![
             botao(
-                icone_traco("file-code", 18.0).into(),
+                ICONE_ARQUIVOS,
                 "Explorador  Ctrl+B",
                 lado == Some(Lado::Explorador),
                 Msg::Lado(Lado::Explorador)
             ),
             botao(
-                icone_traco("search", 18.0).into(),
+                ICONE_BUSCA,
                 "Buscar nos arquivos  Ctrl+Shift+F",
                 lado == Some(Lado::Buscar),
                 Msg::Lado(Lado::Buscar)
             ),
+            botao(ICONE_GIT, "Git", lado == Some(Lado::Git), Msg::Lado(Lado::Git)),
             botao(
-                icone_git(18.0).into(),
-                "Git",
-                lado == Some(Lado::Git),
-                Msg::Lado(Lado::Git)
-            ),
-            botao(
-                icone_traco("sparkles", 18.0).into(),
+                ICONE_AGENTE,
                 "Painel do agente",
                 self.agente_aberto,
                 Msg::AlternarAgente
             ),
         ]
-        .spacing(6)
-        .padding([10, 6])
+        .padding([4, 0])
         .width(LARGURA_TRILHO)
         .height(Length::Fill)
         .into()
@@ -595,31 +640,27 @@ impl Code {
                     );
                 }
                 for (sigla, p) in &g.mudancas {
-                    let cor = match sigla.as_str() {
-                        "M" | "MM" | "AM" => AMARELO,
-                        "D" => COR_ERRO(),
-                        _ => VERDE,
-                    };
-                    let nome = self.relativo(p).display().to_string();
-                    c = c.push(
-                        button(
-                            row![
-                                text(nome).size(12).width(Length::Fill),
-                                text(sigla.clone()).font(MONO).size(11).color(cor)
-                            ]
-                            .spacing(6),
-                        )
-                        .on_press(Msg::VerDiff(p.clone()))
-                        .width(Length::Fill)
-                        .padding([3, 12])
-                        .style(|_, s| item_lista(false, s, 0.0)),
-                    );
+                    c = c.push(self.linha_mudanca(sigla, p, Msg::VerDiff(p.clone()), 12.0));
                 }
                 c = c
                     .push(Space::with_height(10))
                     .push(subtitulo_git("Gráfico".into()));
                 for l in &g.grafo {
-                    c = c.push(linha_grafo(l));
+                    let aberto = self
+                        .commit_aberto
+                        .as_ref()
+                        .filter(|(h, _)| l.commit.as_ref().is_some_and(|c| &c.hash == h));
+                    c = c.push(linha_grafo(l, aberto.is_some()));
+                    if let Some((hash, arquivos)) = aberto {
+                        for (sigla, p) in arquivos {
+                            c = c.push(self.linha_mudanca(
+                                sigla,
+                                p,
+                                Msg::VerDiffCommit(hash.clone(), p.clone()),
+                                30.0,
+                            ));
+                        }
+                    }
                 }
                 tema::rolagem(c)
                     .height(Length::Fill)
@@ -864,7 +905,37 @@ fn cor_do_ramo(coluna: usize) -> Color {
     CORES[(coluna / 2) % CORES.len()]
 }
 
-fn linha_grafo(l: &LinhaGrafo) -> Element<'_, Msg> {
+impl Code {
+    /// Arquivo mudado (em Mudanças ou dentro de um commit do gráfico): nome e sigla colorida.
+    fn linha_mudanca<'a>(&self, sigla: &str, p: &Path, ao_clicar: Msg, recuo: f32) -> Element<'a, Msg> {
+        let cor = match sigla {
+            "M" | "MM" | "AM" => AMARELO,
+            "D" => COR_ERRO(),
+            _ => VERDE,
+        };
+        let nome = self.relativo(p).display().to_string();
+        button(
+            row![
+                text(nome).size(12).width(Length::Fill),
+                text(sigla.to_string()).font(MONO).size(11).color(cor)
+            ]
+            .spacing(6),
+        )
+        .on_press(ao_clicar)
+        .width(Length::Fill)
+        .padding(iced::Padding {
+            top: 3.0,
+            bottom: 3.0,
+            left: recuo,
+            right: 12.0,
+        })
+        .style(|_, s| item_lista(false, s, 0.0))
+        .into()
+    }
+}
+
+/// Linha do gráfico; clicar num commit abre (ou fecha) a lista de arquivos dele.
+fn linha_grafo(l: &LinhaGrafo, aberto: bool) -> Element<'_, Msg> {
     let desenho = iced::widget::Row::with_children(l.grafo.chars().enumerate().map(|(i, ch)| {
         let simbolo = if ch == '*' { '●' } else { ch };
         text(simbolo.to_string())
@@ -922,12 +993,12 @@ fn linha_grafo(l: &LinhaGrafo) -> Element<'_, Msg> {
     )
     .padding([6, 8])
     .style(tema::estilo_dica);
-    tooltip(
-        container(linha).padding([0, 12]).height(18).clip(true),
-        dica,
-        tooltip::Position::Right,
-    )
-    .into()
+    let botao = button(container(linha).height(18).clip(true))
+        .on_press(Msg::AbrirCommit(c.hash.clone()))
+        .width(Length::Fill)
+        .padding([0, 12])
+        .style(move |_, s| item_lista(aberto, s, 0.0));
+    tooltip(botao, dica, tooltip::Position::Right).into()
 }
 
 fn titulo_lado(t: &str) -> Element<'_, Msg> {
@@ -950,6 +1021,18 @@ pub fn nome_tema(t: highlighter::Theme) -> &'static str {
 
 #[cfg(test)]
 mod testes {
+    #[test]
+    fn arquivos_do_commit_pelo_name_status() {
+        assert_eq!(
+            super::ler_name_status("M\tsrc/a.rs\nR100\tvelho.rs\tnovo.rs\nA\tb c.md\n"),
+            [
+                ("M".to_string(), "src/a.rs".to_string()),
+                ("R".into(), "novo.rs".into()),
+                ("A".into(), "b c.md".into()),
+            ]
+        );
+    }
+
     #[test]
     fn le_a_diferenca_com_os_numeros_de_linha() {
         let d = super::ler_diff(
