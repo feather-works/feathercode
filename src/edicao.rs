@@ -1,4 +1,5 @@
-//! Tab/Shift+Tab nas linhas selecionadas e Ctrl+; para comentar, pela linguagem do arquivo.
+//! Tab/Shift+Tab nas linhas selecionadas, Ctrl+; para comentar pela linguagem do arquivo,
+//! e Ctrl+Z/Ctrl+Y (o `text_editor` do Iced 0.13 não tem desfazer).
 use iced::widget::text_editor::{Action, Content, Motion};
 use std::path::Path;
 
@@ -135,6 +136,11 @@ fn mapear_linhas(texto: &str, ini: usize, fim: usize, f: impl Fn(&str) -> String
 /// Troca o texto do editor e seleciona de novo as linhas mexidas (ou volta o cursor, se era uma só).
 pub fn trocar_texto(c: &mut Content, novo: &str, ini: usize, fim: usize, coluna: usize) {
     *c = Content::with_text(novo);
+    posicionar(c, ini, fim, coluna);
+}
+
+/// Cursor na coluna da linha `ini` (se `ini == fim`), ou as linhas `ini..=fim` selecionadas.
+fn posicionar(c: &mut Content, ini: usize, fim: usize, coluna: usize) {
     c.perform(Action::Move(Motion::DocumentStart));
     for _ in 0..ini {
         c.perform(Action::Move(Motion::Down));
@@ -152,9 +158,127 @@ pub fn trocar_texto(c: &mut Content, novo: &str, ini: usize, fim: usize, coluna:
     c.perform(Action::Select(Motion::End));
 }
 
+/// Retrato do texto e do cursor antes de uma edição.
+struct Foto {
+    texto: String,
+    linha: usize,
+    coluna: usize,
+}
+
+fn foto(c: &Content) -> Foto {
+    let (linha, coluna) = c.cursor_position();
+    Foto {
+        texto: texto_exato(c),
+        linha,
+        coluna,
+    }
+}
+
+/// As linhas como estão: o `text()` do Iced sempre põe um `\n` no fim, e voltar com ele criaria linha.
+fn texto_exato(c: &Content) -> String {
+    (0..c.line_count())
+        .map(|i| c.line(i).map(|l| l.to_string()).unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+const MAX_DESFAZER: usize = 300;
+
+/// Pilhas do Ctrl+Z e do Ctrl+Y. Digitação seguida vira um passo só, como nos outros editores.
+// shortcut: guarda o texto inteiro a cada passo; com arquivo de muitos MB, trocar por diferenças.
+#[derive(Default)]
+pub struct Desfazer {
+    antes: Vec<Foto>,
+    depois: Vec<Foto>,
+    ultimo: Option<std::time::Instant>,
+}
+
+impl Desfazer {
+    /// Chamar antes de mexer no texto. `agrupar` junta com o passo anterior se ele foi há pouco.
+    pub fn antes_de_editar(&mut self, c: &Content, agrupar: bool) {
+        let agora = std::time::Instant::now();
+        let junto = agrupar
+            && self
+                .ultimo
+                .is_some_and(|t| agora.duration_since(t).as_millis() < 800);
+        if !junto {
+            self.antes.push(foto(c));
+            if self.antes.len() > MAX_DESFAZER {
+                self.antes.remove(0);
+            }
+        }
+        self.depois.clear();
+        self.ultimo = agrupar.then_some(agora);
+    }
+
+    pub fn desfazer(&mut self, c: &mut Content) -> bool {
+        trocar(&mut self.antes, &mut self.depois, c, &mut self.ultimo)
+    }
+
+    pub fn refazer(&mut self, c: &mut Content) -> bool {
+        trocar(&mut self.depois, &mut self.antes, c, &mut self.ultimo)
+    }
+}
+
+fn trocar(
+    de: &mut Vec<Foto>,
+    para: &mut Vec<Foto>,
+    c: &mut Content,
+    ultimo: &mut Option<std::time::Instant>,
+) -> bool {
+    let Some(f) = de.pop() else {
+        return false;
+    };
+    para.push(foto(c));
+    *c = Content::with_text(&f.texto);
+    // O `with_text` engole a última linha vazia: devolve ela.
+    while c.line_count() < f.texto.split('\n').count() {
+        c.perform(Action::Move(Motion::DocumentEnd));
+        c.perform(Action::Edit(iced::widget::text_editor::Edit::Enter));
+    }
+    posicionar(c, f.linha, f.linha, f.coluna);
+    *ultimo = None;
+    true
+}
+
+/// Digitar e apagar caractere juntam num passo; Enter, colar e o resto são passos próprios.
+pub fn agrupa(acao: &Action) -> bool {
+    use iced::widget::text_editor::Edit;
+    matches!(
+        acao,
+        Action::Edit(Edit::Insert(c)) if !c.is_whitespace() || *c == ' '
+    ) || matches!(acao, Action::Edit(Edit::Backspace | Edit::Delete))
+}
+
 #[cfg(test)]
 mod testes {
     use super::*;
+
+    #[test]
+    fn desfaz_e_refaz() {
+        use iced::widget::text_editor::Edit;
+        let mut c = Content::with_text("ab");
+        let mut d = Desfazer::default();
+        c.perform(Action::Move(Motion::DocumentEnd));
+        for ch in ['c', 'd'] {
+            let acao = Action::Edit(Edit::Insert(ch));
+            d.antes_de_editar(&c, agrupa(&acao));
+            c.perform(acao);
+        }
+        let enter = Action::Edit(Edit::Enter);
+        d.antes_de_editar(&c, agrupa(&enter));
+        c.perform(enter);
+        assert_eq!(texto_exato(&c), "abcd\n");
+        assert!(d.desfazer(&mut c));
+        assert_eq!(texto_exato(&c), "abcd");
+        assert!(d.desfazer(&mut c));
+        assert_eq!(texto_exato(&c), "ab", "as duas letras seguidas são um passo só");
+        assert!(!d.desfazer(&mut c));
+        assert!(d.refazer(&mut c));
+        assert_eq!(texto_exato(&c), "abcd");
+        assert!(d.refazer(&mut c));
+        assert_eq!(texto_exato(&c), "abcd\n");
+    }
 
     #[test]
     fn tab_e_shift_tab_nas_linhas() {

@@ -79,6 +79,7 @@ struct Aba {
     caminho: PathBuf,
     conteudo: text_editor::Content,
     sujo: bool,
+    desfazer: edicao::Desfazer,
     /// Colunas da linha mais comprida: a largura da área rolável.
     maior: usize,
 }
@@ -187,6 +188,8 @@ enum Msg {
     ProcurarArquivo,
     Recuar(bool),
     Comentar,
+    /// Ctrl+Z (`false`) e Ctrl+Y / Ctrl+Shift+Z (`true`).
+    Desfazer(bool),
 }
 
 struct Code {
@@ -543,6 +546,7 @@ impl Code {
                 let Some(aba) = self.abas.get_mut(self.ativa) else {
                     return Task::none();
                 };
+                aba.desfazer.antes_de_editar(&aba.conteudo, false);
                 // Tab sem seleção só põe espaços no cursor, como em qualquer editor.
                 if mais && aba.conteudo.selection().is_none() {
                     for _ in 0..4 {
@@ -559,6 +563,20 @@ impl Code {
                 aba.sujo = true;
                 aba.maior = maior_linha(&aba.conteudo.text());
             }
+            Msg::Desfazer(refazer) => {
+                let Some(aba) = self.abas.get_mut(self.ativa) else {
+                    return Task::none();
+                };
+                let mudou = if refazer {
+                    aba.desfazer.refazer(&mut aba.conteudo)
+                } else {
+                    aba.desfazer.desfazer(&mut aba.conteudo)
+                };
+                if mudou {
+                    aba.sujo = true;
+                    aba.maior = maior_linha(&aba.conteudo.text());
+                }
+            }
             Msg::Comentar => {
                 let Some(aba) = self.abas.get_mut(self.ativa) else {
                     return Task::none();
@@ -567,6 +585,7 @@ impl Code {
                     self.aviso = "Não sei comentar este tipo de arquivo.".into();
                     return Task::none();
                 };
+                aba.desfazer.antes_de_editar(&aba.conteudo, false);
                 let (ini, fim) = edicao::linhas_da_selecao(&aba.conteudo);
                 let (_, col) = aba.conteudo.cursor_position();
                 let novo = edicao::comentar(&aba.conteudo.text(), ini, fim, marca);
@@ -718,6 +737,7 @@ impl Code {
                                 maior: maior_linha(&t),
                                 conteudo: text_editor::Content::with_text(&t),
                                 sujo: false,
+                                desfazer: Default::default(),
                             });
                             self.ativa = self.abas.len() - 1;
                             self.aviso.clear();
@@ -744,6 +764,10 @@ impl Code {
             Msg::Editar(acao) => {
                 if let Some(aba) = self.abas.get_mut(self.ativa) {
                     let editou = acao.is_edit();
+                    if editou {
+                        aba.desfazer
+                            .antes_de_editar(&aba.conteudo, edicao::agrupa(&acao));
+                    }
                     aba.conteudo.perform(acao);
                     if editou {
                         aba.sujo = true;
@@ -1300,6 +1324,12 @@ impl Code {
                     }
                     keyboard::Key::Character(";") if k.modifiers.command() => {
                         Some(Binding::Custom(Msg::Comentar))
+                    }
+                    keyboard::Key::Character("z" | "Z") if k.modifiers.command() => {
+                        Some(Binding::Custom(Msg::Desfazer(k.modifiers.shift())))
+                    }
+                    keyboard::Key::Character("y" | "Y") if k.modifiers.command() => {
+                        Some(Binding::Custom(Msg::Desfazer(true)))
                     }
                     _ => Binding::from_key_press(k),
                 }
