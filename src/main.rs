@@ -2,6 +2,7 @@
 mod agente;
 mod arvore;
 mod config;
+mod execucao;
 mod inicio;
 mod modelos;
 mod paineis;
@@ -140,7 +141,9 @@ enum Msg {
     Comando(String),
     Rodar,
     FocarTerminal,
-    Rodou(String),
+    Saida(execucao::Saida),
+    RodarProjeto,
+    PararComando,
     Janela(Option<window::Id>),
     Tamanho(Size),
     Capturar,
@@ -194,6 +197,8 @@ struct Code {
     comando: String,
     saida: String,
     rodando: bool,
+    /// Mata o comando que está rodando.
+    parar: Option<tokio::sync::oneshot::Sender<()>>,
     aviso: String,
     ramo: Option<String>,
     tamanho: Size,
@@ -247,6 +252,7 @@ impl Code {
             comando: String::new(),
             saida: String::new(),
             rodando: false,
+            parar: None,
             aviso: String::new(),
             ramo: ramo(&pasta),
             tamanho: Size::new(1380.0, 860.0),
@@ -276,6 +282,7 @@ impl Code {
         }
         if std::env::var_os("FEATHERCODE_CAPTURAR_EXEMPLO").is_some() {
             code.itens = agente::exemplo();
+            code.saida = "$ cargo test\n   Compiling feathercode v0.1.0\ntest result: ok. 14 passed; 0 failed\n".into();
             code.uso = (Some(0.43), Some(0.63));
         }
         code.atualizar_recentes();
@@ -293,6 +300,7 @@ impl Code {
             keyboard::Key::Character("s") if m.command() => Some(Msg::Salvar),
             keyboard::Key::Character("o") if m.command() => Some(Msg::AbrirPasta),
             keyboard::Key::Character("b") if m.command() => Some(Msg::Lado(Lado::Explorador)),
+            keyboard::Key::Named(keyboard::key::Named::F5) => Some(Msg::RodarProjeto),
             keyboard::Key::Character("j") if m.command() => Some(Msg::AlternarTerminal),
             keyboard::Key::Character("f" | "F") if m.command() && m.shift() => {
                 Some(Msg::Lado(Lado::Buscar))
@@ -324,6 +332,21 @@ impl Code {
         self.proximo_controle += 1;
         let linha = agente::controle(self.proximo_controle, pedido);
         self.enviar(linha);
+    }
+
+    fn iniciar_comando(&mut self, cmd: String) -> Task<Msg> {
+        if self.rodando {
+            self.aviso = "Já tem um comando rodando no terminal. Pare ele antes.".into();
+            return Task::none();
+        }
+        self.rodando = true;
+        self.saida.push_str(&format!("$ {cmd}\n"));
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.parar = Some(tx);
+        Task::run(
+            execucao::executar(cmd, self.arvore.raiz.clone(), rx),
+            Msg::Saida,
+        )
     }
 
     fn tema_codigo(&self) -> highlighter::Theme {
@@ -441,7 +464,7 @@ impl Code {
                 | Msg::Capturado(_)
                 | Msg::Agente(_)
                 | Msg::Tamanho(_)
-                | Msg::Rodou(_)
+                | Msg::Saida(_)
                 | Msg::Git(_)
                 | Msg::Achados(_)
                 | Msg::Ini(inicio::Ini::ClaudeVersao(_) | inicio::Ini::OutrosAgentes(_))
@@ -676,13 +699,42 @@ impl Code {
                     self.comando = cmd;
                     return Task::none();
                 }
-                self.rodando = true;
-                self.saida.push_str(&format!("$ {cmd}\n"));
-                return Task::perform(rodar(cmd, self.arvore.raiz.clone()), Msg::Rodou);
+                return self.iniciar_comando(cmd);
             }
-            Msg::Rodou(s) => {
-                self.rodando = false;
-                self.saida.push_str(&s);
+            Msg::RodarProjeto => {
+                let arquivo = self.aba().map(|a| a.caminho.clone());
+                match execucao::comando_do_projeto(&self.arvore.raiz, arquivo.as_deref()) {
+                    Some(cmd) => {
+                        self.terminal_aberto = true;
+                        return self.iniciar_comando(cmd);
+                    }
+                    None => {
+                        self.aviso =
+                            "Não sei como rodar esta pasta. Digite o comando no terminal.".into()
+                    }
+                }
+            }
+            Msg::PararComando => {
+                if let Some(tx) = self.parar.take() {
+                    let _ = tx.send(());
+                }
+            }
+            Msg::Saida(s) => {
+                match s {
+                    execucao::Saida::Linha(l) => {
+                        self.saida.push_str(&l);
+                        self.saida.push('\n');
+                    }
+                    execucao::Saida::Fim(f) => {
+                        if !f.is_empty() {
+                            self.saida.push_str(&f);
+                            self.saida.push('\n');
+                        }
+                        self.rodando = false;
+                        self.parar = None;
+                        self.arvore.recarregar();
+                    }
+                }
                 // shortcut: guarda só o fim da saída; um terminal de verdade (PTY) substitui isto.
                 if self.saida.len() > 200_000 {
                     let mut corte = self.saida.len() - 150_000;
@@ -691,7 +743,6 @@ impl Code {
                     }
                     self.saida.drain(..corte);
                 }
-                self.arvore.recarregar();
             }
             Msg::Janela(id) => {
                 self.janela = id;
@@ -960,11 +1011,31 @@ impl Code {
                 });
             row![stack![aba, traco], linha_vertical()].into()
         });
-        container(row(abas))
-            .width(Length::Fill)
-            .height(ALTURA_ABAS)
-            .style(|_| fundo(COR_CROMO_2()))
-            .into()
+        let arquivo = self.aba().map(|a| a.caminho.as_path());
+        let rodar: Element<Msg> = if self.rodando {
+            botao_rodar(
+                "Parar",
+                AMARELO,
+                Msg::PararComando,
+                "Para o comando do terminal".into(),
+            )
+        } else if let Some(cmd) = execucao::comando_do_projeto(&self.arvore.raiz, arquivo) {
+            botao_rodar("Rodar", VERDE, Msg::RodarProjeto, format!("{cmd}  (F5)"))
+        } else {
+            Space::with_width(0).into()
+        };
+        container(
+            row![
+                row(abas).height(Length::Fill),
+                horizontal_space(),
+                container(rodar).padding([0, 10])
+            ]
+            .align_y(Alignment::Center),
+        )
+        .width(Length::Fill)
+        .height(ALTURA_ABAS)
+        .style(|_| fundo(COR_CROMO_2()))
+        .into()
     }
 
     fn editor_view(&self) -> Element<'_, Msg> {
@@ -1084,13 +1155,28 @@ impl Code {
             .anchor_bottom()
             .height(Length::Fill)
             .width(Length::Fill);
-        // Clicar em qualquer ponto do terminal põe o cursor na linha de comando.
-        let painel = container(
-            column![
+        let cabecalho = container(
+            row![
                 text("TERMINAL")
                     .size(11)
                     .font(NEGRITO)
                     .color(COR_TEXTO_MUTED()),
+                text(if self.rodando { "rodando…" } else { "" })
+                    .size(11)
+                    .color(VERDE),
+                horizontal_space(),
+                botao_icone("x", Msg::AlternarTerminal),
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center),
+        )
+        .padding([0, 10])
+        .height(28)
+        .align_y(Alignment::Center)
+        .style(|_| fundo(COR_CROMO_2()));
+        // Clicar em qualquer ponto do terminal põe o cursor na linha de comando.
+        let painel = container(
+            column![
                 saida,
                 row![
                     text("$").font(MONO).size(12).color(COR_AZUL_ACENTO()),
@@ -1101,11 +1187,17 @@ impl Code {
             ]
             .spacing(6),
         )
-        .padding([8, 14])
+        .padding([6, 14])
         .width(Length::Fill)
+        .height(Length::Fill)
+        .style(|_| fundo(cor_terminal()));
+        column![
+            cabecalho,
+            linha_horizontal(),
+            mouse_area(painel).on_press(Msg::FocarTerminal)
+        ]
         .height(ALTURA_TERMINAL)
-        .style(|_| fundo(COR_PAINEL_FAIXA()));
-        mouse_area(painel).on_press(Msg::FocarTerminal).into()
+        .into()
     }
 
     fn agente_view(&self) -> Element<'_, Msg> {
@@ -1679,29 +1771,6 @@ fn barra(rotulo: &str, fracao: f32, valor: String) -> Element<'_, Msg> {
     .into()
 }
 
-async fn rodar(cmd: String, pasta: PathBuf) -> String {
-    // shortcut: roda até o fim e mostra a saída; sem PTY, programa interativo não funciona.
-    #[cfg(windows)]
-    let mut c = tokio::process::Command::new("cmd");
-    #[cfg(windows)]
-    c.arg("/C");
-    #[cfg(not(windows))]
-    let mut c = tokio::process::Command::new("sh");
-    #[cfg(not(windows))]
-    c.arg("-c");
-    match c.arg(&cmd).current_dir(pasta).output().await {
-        Ok(o) => {
-            let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
-            s.push_str(&String::from_utf8_lossy(&o.stderr));
-            if !o.status.success() {
-                s.push_str(&format!("[{}]\n", o.status));
-            }
-            s
-        }
-        Err(e) => format!("Não deu para rodar: {e}\n"),
-    }
-}
-
 /// A pena da marca sem o quadrado de fundo, para ficar sobre a cor do painel.
 fn pena(tamanho: f32) -> iced::widget::Svg<'static> {
     let svg = marca::svg_para(marca::produto_atual(), true);
@@ -1750,6 +1819,60 @@ fn linguagem(caminho: &Path) -> String {
         "" => "Texto",
         outra => return outra.to_uppercase(),
     }
+    .into()
+}
+
+/// Fundo do terminal: mais escuro que o editor, para não se confundir com ele.
+fn cor_terminal() -> Color {
+    mistura_cor(
+        COR_CROMO(),
+        Color::BLACK,
+        if tema::escuro() { 0.3 } else { 0.03 },
+    )
+}
+
+fn botao_rodar<'a>(rotulo: &'a str, cor: Color, msg: Msg, dica: String) -> Element<'a, Msg> {
+    let simbolo = text(if rotulo == "Parar" { "■" } else { "▶" })
+        .size(11)
+        .color(cor);
+    let b = button(
+        row![simbolo, text(rotulo).size(12)]
+            .spacing(6)
+            .align_y(Alignment::Center),
+    )
+    .on_press(msg)
+    .padding([4, 10])
+    .style(move |_, s| button::Style {
+        background: Some(
+            (if matches!(s, button::Status::Hovered) {
+                COR_HOVER()
+            } else {
+                COR_PAINEL()
+            })
+            .into(),
+        ),
+        text_color: COR_TEXTO(),
+        border: Border {
+            color: COR_BORDA(),
+            width: 1.0,
+            radius: 6.0.into(),
+        },
+        ..Default::default()
+    });
+    tooltip(
+        b,
+        container(text(dica).font(MONO).size(11))
+            .padding([4, 8])
+            .style(|_| container::Style {
+                border: Border {
+                    color: COR_BORDA(),
+                    width: 1.0,
+                    radius: 6.0.into(),
+                },
+                ..fundo(COR_PAINEL())
+            }),
+        tooltip::Position::Bottom,
+    )
     .into()
 }
 
@@ -1900,15 +2023,4 @@ fn rolagem_discreta(t: &iced::Theme, s: scrollable::Status) -> scrollable::Style
 }
 
 #[cfg(test)]
-mod testes {
-    #[tokio::test]
-    async fn terminal_roda_na_pasta_e_junta_o_erro() {
-        let s = super::rodar("pwd; echo oi >&2; exit 3".into(), std::env::temp_dir()).await;
-        assert!(
-            s.contains(std::env::temp_dir().to_str().unwrap())
-                && s.contains("oi")
-                && s.contains('3'),
-            "{s}"
-        );
-    }
-}
+mod testes {}

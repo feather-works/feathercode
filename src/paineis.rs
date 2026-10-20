@@ -410,6 +410,11 @@ impl Code {
                 v
             }
             2 => vec![
+                if self.rodando {
+                    ("Parar", "", Msg::PararComando, false)
+                } else {
+                    ("Rodar projeto", "F5", Msg::RodarProjeto, false)
+                },
                 ("Ir para o terminal", "", Msg::FocarTerminal, false),
                 ("Limpar saída", "", Msg::LimparTerminal, false),
             ],
