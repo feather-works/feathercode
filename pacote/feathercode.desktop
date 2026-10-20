@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=FeatherCode
+GenericName=Editor de código
+Comment=Editor de código da suíte FeatherWorks, com o Claude Code no painel lateral
+Exec=feathercode %f
+Icon=feathercode
+Terminal=false
+Categories=Development;IDE;TextEditor;
+Keywords=código;editor;ide;claude;git;terminal;
+StartupWMClass=feathercode
