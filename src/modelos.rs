@@ -362,7 +362,10 @@ mod testes {
         for t in Tipo::TODOS {
             assert!(do_tipo(t).next().is_some(), "{t} sem modelo");
         }
-        let rust = MODELOS.iter().find(|m| m.tipo == Tipo::Terminal && m.selo == "RS").unwrap();
+        let rust = MODELOS
+            .iter()
+            .find(|m| m.tipo == Tipo::Terminal && m.selo == "RS")
+            .unwrap();
         assert_eq!(rust.estrutura("Meu App"), "meu-app/\n├─ src/\n│  ├─ main.rs\n│  └─ processamento.rs\n├─ .gitignore\n├─ Cargo.toml\n└─ README.md");
     }
 

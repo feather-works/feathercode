@@ -498,18 +498,13 @@ impl Code {
         } else {
             self.cartao_novo()
         };
-        let corpo = container(column![cabecalho, cartao].spacing(14))
+        // shortcut: sem rolagem para o cartão poder ocupar a altura toda; janela muito baixa corta o pé.
+        container(column![cabecalho, cartao].spacing(14).height(Length::Fill))
             .padding([22, 24])
-            .max_width(860);
-        container(
-            tema::rolagem(corpo)
-                .style(rolagem_discreta)
-                .height(Length::Fill),
-        )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .style(|_| fundo(COR_PAINEL()))
-        .into()
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(|_| fundo(COR_PAINEL()))
+            .into()
     }
 
     fn cartao_novo(&self) -> Element<'_, Msg> {
@@ -576,12 +571,15 @@ impl Code {
         let estrutura = container(
             column![
                 text("Estrutura").size(11).color(COR_TEXTO_MUTED()),
-                text(m.estrutura(&e.nome)).font(MONO).size(12)
+                tema::rolagem(text(m.estrutura(&e.nome)).font(MONO).size(12))
+                    .style(rolagem_discreta)
+                    .height(Length::Fill)
             ]
             .spacing(6),
         )
         .padding([10, 12])
         .width(Length::Fill)
+        .height(Length::Fill)
         .style(|_| container::Style {
             border: Border {
                 color: COR_BORDA_SUAVE(),
@@ -624,7 +622,7 @@ impl Code {
             column![
                 menus,
                 text(m.descricao).size(12).color(COR_TEXTO_MUTED()),
-                row![campos, estrutura].spacing(18),
+                row![campos, estrutura].spacing(18).height(Length::Fill),
                 linha_horizontal(),
                 rodape,
                 self.erro_view()
@@ -721,6 +719,7 @@ fn cartao(corpo: Element<'_, Msg>) -> Element<'_, Msg> {
     container(corpo)
         .padding([18, 20])
         .width(Length::Fill)
+        .height(Length::Fill)
         .style(|_| container::Style {
             border: Border {
                 color: COR_BORDA(),
