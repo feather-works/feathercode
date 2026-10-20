@@ -672,6 +672,7 @@ impl Code {
                 }
             }
             Msg::TrocarAba(i) => self.ativa = i,
+            Msg::FecharAba(i) if i >= self.abas.len() => {}
             Msg::FecharAba(i) => {
                 // shortcut: fecha sem perguntar mesmo com mudança; pedir confirmação no diálogo da suíte depois.
                 self.abas.remove(i);
@@ -905,11 +906,7 @@ impl Code {
                         .align_y(Alignment::Center)
                 )
                 .width(paineis::LARGURA_MARCA),
-                if self.inicio {
-                    Space::with_width(0).into()
-                } else {
-                    self.menus_view()
-                },
+                self.menus_view(),
                 text(pasta).size(13).color(COR_TEXTO_MUTED()),
                 horizontal_space(),
                 voltar,
@@ -941,17 +938,25 @@ impl Code {
             },
         );
 
-        if self.inicio {
-            return cromo::moldura_janela(
-                column![
-                    barra,
-                    self.inicio_view(),
-                    linha_horizontal(),
-                    self.status_view()
-                ]
-                .into(),
-            );
-        }
+        let janela: Element<Msg> = if self.inicio {
+            column![
+                barra,
+                self.inicio_view(),
+                linha_horizontal(),
+                self.status_view()
+            ]
+            .into()
+        } else {
+            self.area_de_trabalho(barra)
+        };
+        let janela = match self.menu_aberto_view() {
+            Some(menu) => stack![janela, menu].into(),
+            None => janela,
+        };
+        cromo::moldura_janela(janela)
+    }
+
+    fn area_de_trabalho<'a>(&'a self, barra: Element<'a, Msg>) -> Element<'a, Msg> {
         let mut centro = column![self.abas_view(), self.editor_view()].width(Length::Fill);
         if self.terminal_aberto {
             centro = centro.push(linha_horizontal()).push(self.terminal_view());
@@ -964,13 +969,7 @@ impl Code {
         if self.agente_aberto {
             meio = meio.push(linha_vertical()).push(self.agente_view());
         }
-        let janela: Element<Msg> =
-            column![barra, meio, linha_horizontal(), self.status_view()].into();
-        let janela = match self.menu_aberto_view() {
-            Some(menu) => stack![janela, menu].into(),
-            None => janela,
-        };
-        cromo::moldura_janela(janela)
+        column![barra, meio, linha_horizontal(), self.status_view()].into()
     }
 
     fn arvore_view(&self) -> Element<'_, Msg> {

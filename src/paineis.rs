@@ -1,4 +1,5 @@
 //! Trilho da esquerda (Explorador, Buscar, Git, Agente), os painéis de busca e de Git e o menu do topo.
+use crate::config::Tema;
 use crate::*;
 use iced::widget::{column, row};
 
@@ -371,49 +372,73 @@ impl Code {
 
     fn itens_menu(&self, i: usize) -> Vec<Item> {
         match i {
-            0 => vec![
-                ("Abrir pasta…", "Ctrl+O", Msg::AbrirPasta, false),
-                ("Salvar", "Ctrl+S", Msg::Salvar, false),
-                ("Fechar aba", "", Msg::FecharAba(self.ativa), false),
-                ("Início", "", Msg::IrInicio, false),
-            ],
+            // Na página inicial não há pasta aberta: só o que funciona sem ela.
+            0 if self.inicio => vec![("Abrir pasta…", "Ctrl+O", Msg::AbrirPasta, false)],
+            0 => {
+                let mut v = vec![("Abrir pasta…", "Ctrl+O", Msg::AbrirPasta, false)];
+                if !self.abas.is_empty() {
+                    v.push(("Salvar", "Ctrl+S", Msg::Salvar, false));
+                    v.push(("Fechar aba", "", Msg::FecharAba(self.ativa), false));
+                }
+                v.push(("Início", "", Msg::IrInicio, false));
+                v
+            }
             1 => {
-                let mut v = vec![
-                    (
-                        "Explorador",
-                        "Ctrl+B",
-                        Msg::Lado(Lado::Explorador),
-                        self.lado == Some(Lado::Explorador),
-                    ),
-                    (
-                        "Buscar nos arquivos",
-                        "Ctrl+Shift+F",
-                        Msg::Lado(Lado::Buscar),
-                        self.lado == Some(Lado::Buscar),
-                    ),
-                    (
-                        "Git",
-                        "",
-                        Msg::Lado(Lado::Git),
-                        self.lado == Some(Lado::Git),
-                    ),
-                    (
-                        "Terminal",
-                        "Ctrl+J",
-                        Msg::AlternarTerminal,
-                        self.terminal_aberto,
-                    ),
-                    (
-                        "Painel do agente",
-                        "",
-                        Msg::AlternarAgente,
-                        self.agente_aberto,
-                    ),
-                ];
+                let mut v = if self.inicio {
+                    Vec::new()
+                } else {
+                    vec![
+                        (
+                            "Explorador",
+                            "Ctrl+B",
+                            Msg::Lado(Lado::Explorador),
+                            self.lado == Some(Lado::Explorador),
+                        ),
+                        (
+                            "Buscar nos arquivos",
+                            "Ctrl+Shift+F",
+                            Msg::Lado(Lado::Buscar),
+                            self.lado == Some(Lado::Buscar),
+                        ),
+                        (
+                            "Git",
+                            "",
+                            Msg::Lado(Lado::Git),
+                            self.lado == Some(Lado::Git),
+                        ),
+                        (
+                            "Terminal",
+                            "Ctrl+J",
+                            Msg::AlternarTerminal,
+                            self.terminal_aberto,
+                        ),
+                        (
+                            "Painel do agente",
+                            "",
+                            Msg::AlternarAgente,
+                            self.agente_aberto,
+                        ),
+                    ]
+                };
+                for (n, (nome, t)) in [
+                    ("Escuro", Tema::Escuro),
+                    ("Claro", Tema::Claro),
+                    ("Igual ao sistema", Tema::Sistema),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    v.push((
+                        nome,
+                        if n == 0 { "§Tema da janela" } else { "" },
+                        Msg::Ini(inicio::Ini::Tema(t)),
+                        self.config.tema == t,
+                    ));
+                }
                 for (n, t) in highlighter::Theme::ALL.iter().enumerate() {
                     v.push((
                         nome_tema(*t),
-                        if n == 0 { "Cores do código" } else { "" },
+                        if n == 0 { "§Cores do código" } else { "" },
                         Msg::TemaCodigo(n),
                         self.tema_codigo() == *t,
                     ));
@@ -436,32 +461,38 @@ impl Code {
     }
 
     pub(crate) fn menus_view(&self) -> Element<'_, Msg> {
-        let botoes = MENUS.iter().enumerate().map(|(i, (nome, largura))| {
-            let aberto = self.menu == Some(i);
-            button(
-                text(*nome)
-                    .size(12)
-                    .color(if aberto {
-                        COR_TEXTO()
-                    } else {
-                        COR_TEXTO_MUTED()
-                    })
-                    .center(),
-            )
-            .on_press(Msg::Menu(if aberto { None } else { Some(i) }))
-            .width(*largura)
-            .padding([4, 0])
-            .style(move |_, s| button::Style {
-                background: (aberto || matches!(s, button::Status::Hovered))
-                    .then(|| COR_HOVER().into()),
-                border: Border {
-                    radius: 5.0.into(),
+        // Na página inicial só Arquivo e Exibir: Terminal e Agente pedem uma pasta aberta.
+        let n = if self.inicio { 2 } else { MENUS.len() };
+        let botoes = MENUS
+            .iter()
+            .take(n)
+            .enumerate()
+            .map(|(i, (nome, largura))| {
+                let aberto = self.menu == Some(i);
+                button(
+                    text(*nome)
+                        .size(12)
+                        .color(if aberto {
+                            COR_TEXTO()
+                        } else {
+                            COR_TEXTO_MUTED()
+                        })
+                        .center(),
+                )
+                .on_press(Msg::Menu(if aberto { None } else { Some(i) }))
+                .width(*largura)
+                .padding([4, 0])
+                .style(move |_, s| button::Style {
+                    background: (aberto || matches!(s, button::Status::Hovered))
+                        .then(|| COR_HOVER().into()),
+                    border: Border {
+                        radius: 5.0.into(),
+                        ..Default::default()
+                    },
                     ..Default::default()
-                },
-                ..Default::default()
-            })
-            .into()
-        });
+                })
+                .into()
+            });
         iced::widget::Row::with_children(botoes).into()
     }
 
@@ -470,12 +501,15 @@ impl Code {
         let i = self.menu?;
         let x = 12.0 + LARGURA_MARCA + MENUS[..i].iter().map(|m| m.1).sum::<f32>();
         let mut lista = Column::new().spacing(1);
+        let mut primeiro = true;
         for (rotulo, atalho, msg, marcado) in self.itens_menu(i) {
-            // "Cores do código" abre a seção dos temas.
-            if atalho == "Cores do código" {
-                lista = lista.push(linha_horizontal()).push(
-                    container(text("Cores do código").size(11).color(COR_TEXTO_MUTED()))
-                        .padding([4, 10]),
+            // Atalho começando com § abre uma seção com esse título antes do item.
+            if let Some(titulo) = atalho.strip_prefix('§') {
+                if !primeiro {
+                    lista = lista.push(linha_horizontal());
+                }
+                lista = lista.push(
+                    container(text(titulo).size(11).color(COR_TEXTO_MUTED())).padding([4, 10]),
                 );
             }
             let marca: Element<Msg> = if marcado {
@@ -483,11 +517,8 @@ impl Code {
             } else {
                 Space::with_width(13).into()
             };
-            let atalho_txt = if atalho == "Cores do código" {
-                ""
-            } else {
-                atalho
-            };
+            primeiro = false;
+            let atalho_txt = if atalho.starts_with('§') { "" } else { atalho };
             lista = lista.push(
                 button(
                     row![

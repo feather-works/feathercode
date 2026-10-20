@@ -7,7 +7,7 @@ use crate::*;
 use iced::widget::{checkbox, column, row};
 
 const LARGURA_ESQUERDA: f32 = 330.0;
-const MAX_RECENTES: usize = 8;
+const MAX_RECENTES: usize = 5;
 
 #[derive(Debug, Clone)]
 pub enum Ini {
@@ -158,7 +158,13 @@ impl Code {
             })
             .collect();
         v.sort_by_key(|r| std::cmp::Reverse(r.quando));
-        v.truncate(MAX_RECENTES);
+        // Até MAX_RECENTES de cada: pastas e arquivos aparecem em listas separadas.
+        let (mut pastas, mut arquivos) = (0, 0);
+        v.retain(|r| {
+            let n = if r.pasta { &mut pastas } else { &mut arquivos };
+            *n += 1;
+            *n <= MAX_RECENTES
+        });
         self.ini.recentes = v;
     }
 
@@ -373,36 +379,40 @@ impl Code {
         } else {
             link_pequeno("Limpar", Msg::Ini(Ini::LimparRecentes))
         };
-        let mut recentes = Column::new().spacing(1).push(
-            row![titulo_secao("Recentes"), horizontal_space(), limpar].align_y(Alignment::Center),
-        );
-        if e.recentes.is_empty() {
-            recentes = recentes.push(
-                text("O que você abrir aparece aqui.")
-                    .size(12)
-                    .color(COR_TEXTO_MUTED()),
-            );
-        }
-        for r in &e.recentes {
+        let linha_recente = |r: &LinhaRecente| -> Element<'_, Msg> {
             let nome = r
                 .caminho
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| r.caminho.display().to_string());
-            let pai = r.caminho.parent().map(encurtar).unwrap_or_default();
+            // Pasta: onde ela fica. Arquivo: as duas pastas de cima, que dizem de qual projeto é.
+            let pai = match r.caminho.parent() {
+                Some(p) if r.pasta => encurtar(p),
+                Some(p) => {
+                    let partes: Vec<_> =
+                        p.iter().map(|c| c.to_string_lossy().into_owned()).collect();
+                    partes[partes.len().saturating_sub(2)..].join("/")
+                }
+                None => String::new(),
+            };
             let simbolo = icone_traco(if r.pasta { "folder" } else { "file-code" }, 14.0);
             let ramo: Element<Msg> = match &r.ramo {
-                Some(rm) => container(text(rm).font(MONO).size(10).color(COR_TEXTO_MUTED()))
-                    .padding([0, 5])
-                    .style(|_| container::Style {
-                        border: Border {
-                            color: COR_BORDA(),
-                            width: 1.0,
-                            radius: 4.0.into(),
-                        },
-                        ..Default::default()
-                    })
-                    .into(),
+                Some(rm) => container(
+                    text(rm.clone())
+                        .font(MONO)
+                        .size(10)
+                        .color(COR_TEXTO_MUTED()),
+                )
+                .padding([0, 5])
+                .style(|_| container::Style {
+                    border: Border {
+                        color: COR_BORDA(),
+                        width: 1.0,
+                        radius: 4.0.into(),
+                    },
+                    ..Default::default()
+                })
+                .into(),
                 None => Space::with_width(0).into(),
             };
             let linha = row![
@@ -419,14 +429,45 @@ impl Code {
             ]
             .spacing(8)
             .align_y(Alignment::Center);
-            recentes = recentes.push(
-                button(linha)
-                    .on_press(Msg::Ini(Ini::AbrirRecente(r.caminho.clone(), r.pasta)))
-                    .padding([5, 6])
-                    .width(Length::Fill)
-                    .style(|_, s| item_lista(false, s, 6.0)),
+            button(linha)
+                .on_press(Msg::Ini(Ini::AbrirRecente(r.caminho.clone(), r.pasta)))
+                .padding([5, 6])
+                .width(Length::Fill)
+                .style(|_, s| item_lista(false, s, 6.0))
+                .into()
+        };
+        let secao = |titulo: &'static str,
+                     pasta: bool,
+                     vazio: &'static str,
+                     extra: Element<'static, Msg>| {
+            let mut c = Column::new().spacing(1).push(
+                row![titulo_secao(titulo), horizontal_space(), extra].align_y(Alignment::Center),
             );
-        }
+            let mut algum = false;
+            for r in e.recentes.iter().filter(|r| r.pasta == pasta) {
+                c = c.push(linha_recente(r));
+                algum = true;
+            }
+            if !algum {
+                c = c.push(text(vazio).size(12).color(COR_TEXTO_MUTED()));
+            }
+            c
+        };
+        let recentes = column![
+            secao(
+                "Pastas recentes",
+                true,
+                "As pastas que você abrir aparecem aqui.",
+                limpar
+            ),
+            secao(
+                "Arquivos recentes",
+                false,
+                "Os arquivos que você abrir aparecem aqui.",
+                Space::with_width(0).into()
+            ),
+        ]
+        .spacing(16);
 
         let claude = self.cartao_claude();
 
