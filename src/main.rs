@@ -140,6 +140,7 @@ enum Msg {
     Parar,
     NovaConversa,
     TrocarChat(u64),
+    FecharChat(u64),
     EventoChat(u64, agente::Evento),
     Modo(Modo),
     Provedor(agente::Provedor),
@@ -855,10 +856,29 @@ impl Code {
             }
             Msg::Parar => self.controle(serde_json::json!({"subtype": "interrupt"})),
             Msg::NovaConversa => {
+                // A conversa atual ainda vazia serve: não abre outra aba à toa.
+                if self.chat.itens.is_empty() && !self.chat.ligado {
+                    self.chat.historico = None;
+                    return Task::none();
+                }
                 let novo = Chat::novo(self.proximo_chat, self.chat.provedor, self.chat.modo);
                 self.proximo_chat += 1;
                 self.outros_chats
                     .push(std::mem::replace(&mut self.chat, novo));
+            }
+            // Soltar o Chat solta a subscription, e o processo do agente morre junto.
+            Msg::FecharChat(id) => {
+                if id == self.chat.conversa {
+                    self.chat = match self.outros_chats.pop() {
+                        Some(c) => c,
+                        None => {
+                            self.proximo_chat += 1;
+                            Chat::novo(self.proximo_chat - 1, self.chat.provedor, self.chat.modo)
+                        }
+                    };
+                } else {
+                    self.outros_chats.retain(|c| c.conversa != id);
+                }
             }
             Msg::TrocarChat(id) => {
                 self.trocar_chat(id);
@@ -1683,15 +1703,33 @@ impl Code {
                 })
                 .unwrap_or_else(|| format!("Chat {}", chat.conversa + 1));
             let ativo = chat.conversa == self.chat.conversa;
+            let fechar = button(text("×").size(12).color(COR_TEXTO_MUTED()))
+                .on_press(Msg::FecharChat(chat.conversa))
+                .padding([0, 4])
+                .style(|_, s| item_lista(false, s, 3.0));
             abas_chat = abas_chat.push(
-                button(text(format!("{titulo} · {estado}")).size(11))
-                    .on_press(Msg::TrocarChat(chat.conversa))
-                    .style(move |_, s| item_lista(ativo, s, 4.0)),
+                button(
+                    row![text(format!("{titulo} · {estado}")).size(11), fechar]
+                        .spacing(6)
+                        .align_y(Alignment::Center),
+                )
+                .on_press(Msg::TrocarChat(chat.conversa))
+                .padding([2, 8])
+                .style(move |_, s| item_lista(ativo, s, 4.0)),
             );
         }
-        let abas_chat = scrollable(abas_chat).direction(scrollable::Direction::Horizontal(
-            scrollable::Scrollbar::default(),
-        ));
+        // Com uma conversa só, a barra de abas não aparece.
+        let abas_chat: Element<Msg> = if self.outros_chats.is_empty() {
+            Space::with_height(0).into()
+        } else {
+            container(
+                scrollable(abas_chat).direction(scrollable::Direction::Horizontal(
+                    scrollable::Scrollbar::new().width(3).scroller_width(3),
+                )),
+            )
+            .padding([4, 8])
+            .into()
+        };
         let mut corpo = Column::new().spacing(12).padding([14, 14]);
         if self.chat.detalhes {
             corpo = corpo.push(self.detalhes_view());
