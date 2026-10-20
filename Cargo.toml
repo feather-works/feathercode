@@ -1,0 +1,21 @@
+[package]
+name = "feathercode"
+version = "0.1.0"
+description = "Editor de código da suíte FeatherWorks, com o Claude Code no painel lateral"
+authors = ["FeatherWorks"]
+edition = "2021"
+license = "GPL-3.0-only"
+repository = "https://github.com/feather-works/feathercode"
+publish = false
+
+[dependencies]
+feather-ui = { git = "https://github.com/feather-works/feather-ui", tag = "v0.2.10" }
+iced = { version = "0.13", features = ["svg", "tokio", "highlighter", "auto-detect-theme"] }
+# Mesma escolha do FeatherSheet: diálogo nativo pelo portal, sem GTK.
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
+serde_json = "1"
+tokio = { version = "1", features = ["process", "io-util", "macros", "sync", "rt"] }
+
+[profile.release]
+lto = "thin"
+strip = true

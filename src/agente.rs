@@ -1,0 +1,248 @@
+//! Conversa com o `claude` instalado, pelo mesmo protocolo que a extensão do VS Code usa
+//! (Agent SDK): uma mensagem JSON por linha na entrada e na saída do processo.
+use iced::futures::{SinkExt, Stream};
+use serde_json::{json, Value};
+use std::path::PathBuf;
+use std::process::Stdio;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::sync::mpsc;
+
+#[derive(Debug, Clone)]
+pub enum Evento {
+    /// O processo abriu; por este canal vão as linhas para a entrada dele.
+    Pronto(mpsc::UnboundedSender<String>),
+    Mensagem(Value),
+    /// O processo terminou; `Some` traz o motivo quando foi erro.
+    Encerrado(Option<String>),
+}
+
+/// Abre o `claude` na pasta e repassa tudo o que ele escreve. Soltar o stream mata o processo.
+pub fn conversa(pasta: PathBuf, modo: &'static str) -> impl Stream<Item = Evento> {
+    iced::stream::channel(64, move |mut saida| async move {
+        let filho = tokio::process::Command::new("claude")
+            .args(["--output-format", "stream-json", "--input-format", "stream-json", "--verbose"])
+            .args(["--permission-prompt-tool", "stdio", "--permission-mode", modo])
+            .current_dir(&pasta)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn();
+        let mut filho = match filho {
+            Ok(f) => f,
+            Err(e) => {
+                let motivo = format!("Não consegui abrir o claude ({e}). Instale o Claude Code e confira se o comando `claude` está no PATH.");
+                let _ = saida.send(Evento::Encerrado(Some(motivo))).await;
+                return;
+            }
+        };
+        let mut entrada = filho.stdin.take().expect("stdin pedido");
+        let mut linhas = BufReader::new(filho.stdout.take().expect("stdout pedido")).lines();
+        let mut erros = filho.stderr.take().expect("stderr pedido");
+        // Lido em paralelo: se ninguém esvaziar o stderr, o processo trava quando ele enche.
+        let erros = tokio::spawn(async move {
+            let mut s = String::new();
+            let _ = erros.read_to_string(&mut s).await;
+            s
+        });
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+        let _ = saida.send(Evento::Pronto(tx)).await;
+        loop {
+            tokio::select! {
+                l = linhas.next_line() => match l {
+                    Ok(Some(l)) => {
+                        if let Ok(v) = serde_json::from_str(&l) {
+                            let _ = saida.send(Evento::Mensagem(v)).await;
+                        }
+                    }
+                    _ => break,
+                },
+                Some(m) = rx.recv() => {
+                    if entrada.write_all(format!("{m}\n").as_bytes()).await.is_err() || entrada.flush().await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+        let status = filho.wait().await;
+        let texto = erros.await.unwrap_or_default();
+        let motivo = match status {
+            Ok(s) if s.success() => None,
+            Ok(s) => Some(format!("O claude terminou com erro ({s}). {}", texto.trim())),
+            Err(e) => Some(e.to_string()),
+        };
+        let _ = saida.send(Evento::Encerrado(motivo)).await;
+    })
+}
+
+pub fn mensagem_usuario(texto: &str) -> String {
+    json!({"type": "user", "message": {"role": "user", "content": texto}}).to_string()
+}
+
+/// `sempre` repassa as sugestões do próprio claude ("não perguntar de novo nesta sessão").
+pub fn permitir(request_id: &str, input: &Value, sempre: Option<&Value>) -> String {
+    let mut resposta = json!({"behavior": "allow", "updatedInput": input});
+    if let Some(s) = sempre.filter(|s| s.as_array().is_some_and(|a| !a.is_empty())) {
+        resposta["updatedPermissions"] = s.clone();
+    }
+    json!({"type": "control_response", "response": {"subtype": "success", "request_id": request_id, "response": resposta}}).to_string()
+}
+
+pub fn negar(request_id: &str) -> String {
+    let resposta = json!({"behavior": "deny", "message": "A pessoa recusou pelo FeatherCode. Pergunte o que mudar antes de tentar de novo."});
+    json!({"type": "control_response", "response": {"subtype": "success", "request_id": request_id, "response": resposta}}).to_string()
+}
+
+/// Pedido do editor para o claude: `interrupt`, `set_permission_mode`…
+pub fn controle(id: u64, pedido: Value) -> String {
+    json!({"type": "control_request", "request_id": format!("feathercode-{id}"), "request": pedido}).to_string()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Resposta {
+    Pendente,
+    Gravou,
+    Sempre,
+    Recusou,
+}
+
+#[derive(Debug, Clone)]
+pub enum Item {
+    Eu(String),
+    Texto(String),
+    Ferramenta { id: String, frase: String, erro: bool },
+    Pedido { request_id: String, frase: String, previa: Vec<(char, String)>, input: Value, sugestoes: Value, resposta: Resposta },
+    Aviso(String),
+}
+
+#[derive(Debug)]
+pub enum Sinal {
+    Item(Item),
+    /// Resultado de uma ferramenta já mostrada (pelo id do `tool_use`).
+    Resultado { id: String, erro: bool },
+    /// Uso da conta, de 0 a 1: janela de 5 horas e de 7 dias.
+    Uso(Option<f32>, Option<f32>),
+    Modelo(String),
+    FimDoTurno(Option<String>),
+}
+
+pub fn interpretar(v: &Value) -> Vec<Sinal> {
+    let conteudo = || v["message"]["content"].as_array().cloned().unwrap_or_default();
+    match v["type"].as_str() {
+        Some("system") if v["subtype"] == "init" => v["model"].as_str().map(|m| Sinal::Modelo(m.into())).into_iter().collect(),
+        Some("assistant") => conteudo()
+            .iter()
+            .filter_map(|c| match c["type"].as_str() {
+                Some("text") => c["text"].as_str().filter(|t| !t.trim().is_empty()).map(|t| Sinal::Item(Item::Texto(t.trim().into()))),
+                Some("tool_use") => Some(Sinal::Item(Item::Ferramenta {
+                    id: c["id"].as_str().unwrap_or_default().into(),
+                    frase: frase(c["name"].as_str().unwrap_or("?"), &c["input"]),
+                    erro: false,
+                })),
+                _ => None,
+            })
+            .collect(),
+        Some("user") => conteudo()
+            .iter()
+            .filter(|c| c["type"] == "tool_result")
+            .map(|c| Sinal::Resultado { id: c["tool_use_id"].as_str().unwrap_or_default().into(), erro: c["is_error"] == true })
+            .collect(),
+        Some("control_request") if v["request"]["subtype"] == "can_use_tool" => {
+            let r = &v["request"];
+            let nome = r["tool_name"].as_str().unwrap_or("?");
+            vec![Sinal::Item(Item::Pedido {
+                request_id: v["request_id"].as_str().unwrap_or_default().into(),
+                frase: frase(nome, &r["input"]),
+                previa: previa(nome, &r["input"]),
+                input: r["input"].clone(),
+                sugestoes: r["permission_suggestions"].clone(),
+                resposta: Resposta::Pendente,
+            })]
+        }
+        Some("rate_limit_event") => {
+            let janelas = &v["rate_limit_info"]["unifiedWindows"];
+            let uso = |j: &str| janelas[j]["utilization"].as_f64().map(|u| u as f32);
+            vec![Sinal::Uso(uso("five_hour"), uso("seven_day"))]
+        }
+        Some("result") => {
+            let erro = (v["is_error"] == true).then(|| v["result"].as_str().unwrap_or("O turno terminou com erro.").to_string());
+            vec![Sinal::FimDoTurno(erro)]
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn nome_curto(caminho: &str) -> &str {
+    caminho.rsplit(['/', '\\']).next().unwrap_or(caminho)
+}
+
+/// "Leu main.rs", "Rodou `cargo test`": o que a ferramenta faz, em uma linha.
+fn frase(nome: &str, input: &Value) -> String {
+    let s = |k: &str| input[k].as_str().unwrap_or_default();
+    match nome {
+        "Read" => format!("Leu {}", nome_curto(s("file_path"))),
+        "Write" => format!("Gravar {}", nome_curto(s("file_path"))),
+        "Edit" | "MultiEdit" => format!("Editar {}", nome_curto(s("file_path"))),
+        "Bash" => format!("Rodar `{}`", s("command").lines().next().unwrap_or_default()),
+        "Grep" => format!("Buscou `{}`", s("pattern")),
+        "Glob" => format!("Procurou arquivos `{}`", s("pattern")),
+        "WebFetch" => format!("Abrir {}", s("url")),
+        "WebSearch" => format!("Pesquisou \"{}\"", s("query")),
+        "TodoWrite" => "Atualizou a lista de tarefas".into(),
+        outro => outro.to_string(),
+    }
+}
+
+const LINHAS_PREVIA: usize = 14;
+
+/// O que vai mudar, para a pessoa decidir: diff do Edit, começo do Write, comando do Bash.
+fn previa(nome: &str, input: &Value) -> Vec<(char, String)> {
+    let linhas = |sinal: char, t: &str| t.lines().map(move |l| (sinal, l.to_string())).collect::<Vec<_>>();
+    let mut v = match nome {
+        "Edit" => [linhas('-', input["old_string"].as_str().unwrap_or_default()), linhas('+', input["new_string"].as_str().unwrap_or_default())].concat(),
+        "MultiEdit" => input["edits"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|e| [linhas('-', e["old_string"].as_str().unwrap_or_default()), linhas('+', e["new_string"].as_str().unwrap_or_default())].concat())
+            .collect(),
+        "Write" => linhas('+', input["content"].as_str().unwrap_or_default()),
+        "Bash" => linhas('$', input["command"].as_str().unwrap_or_default()),
+        _ => Vec::new(),
+    };
+    if v.len() > LINHAS_PREVIA {
+        let resto = v.len() - LINHAS_PREVIA;
+        v.truncate(LINHAS_PREVIA);
+        v.push((' ', format!("… mais {resto} linha(s)")));
+    }
+    v
+}
+
+#[cfg(test)]
+mod testes {
+    use super::*;
+
+    // Linhas reais do claude 2.1.304 (encurtadas), capturadas ao criar o FeatherCode.
+    #[test]
+    fn interpreta_o_pedido_de_permissao_e_o_uso() {
+        let pedido: Value = serde_json::from_str(r#"{"type":"control_request","request_id":"a8a3","request":{"subtype":"can_use_tool","tool_name":"Write","input":{"file_path":"/tmp/x/ola.txt","content":"oi"},"permission_suggestions":[{"type":"setMode","mode":"acceptEdits","destination":"session"}],"tool_use_id":"toolu_01"}}"#).unwrap();
+        let Some(Sinal::Item(Item::Pedido { request_id, frase, previa, .. })) = interpretar(&pedido).pop() else { panic!("sem pedido") };
+        assert_eq!((request_id.as_str(), frase.as_str()), ("a8a3", "Gravar ola.txt"));
+        assert_eq!(previa, vec![('+', "oi".to_string())]);
+
+        let uso: Value = serde_json::from_str(r#"{"type":"rate_limit_event","rate_limit_info":{"unifiedWindows":{"five_hour":{"utilization":0.43},"seven_day":{"utilization":0.63}}}}"#).unwrap();
+        assert!(matches!(interpretar(&uso)[..], [Sinal::Uso(Some(a), Some(b))] if a == 0.43 && b == 0.63));
+    }
+
+    #[test]
+    fn resposta_de_permissao_no_formato_do_sdk() {
+        let input = json!({"file_path": "a.rs"});
+        let sugestoes = json!([{"type": "setMode", "mode": "acceptEdits", "destination": "session"}]);
+        let v: Value = serde_json::from_str(&permitir("r1", &input, Some(&sugestoes))).unwrap();
+        assert_eq!(v["response"]["request_id"], "r1");
+        assert_eq!(v["response"]["response"]["behavior"], "allow");
+        assert_eq!(v["response"]["response"]["updatedPermissions"], sugestoes);
+        let v: Value = serde_json::from_str(&negar("r1")).unwrap();
+        assert_eq!(v["response"]["response"]["behavior"], "deny");
+    }
+}
