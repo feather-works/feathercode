@@ -2,7 +2,7 @@
 //! (Agent SDK): uma mensagem JSON por linha na entrada e na saída do processo.
 use iced::futures::{SinkExt, Stream};
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
@@ -17,7 +17,11 @@ pub enum Evento {
 }
 
 /// Abre o `claude` na pasta e repassa tudo o que ele escreve. Soltar o stream mata o processo.
-pub fn conversa(pasta: PathBuf, modo: &'static str) -> impl Stream<Item = Evento> {
+pub fn conversa(
+    pasta: PathBuf,
+    modo: &'static str,
+    retomar: Option<String>,
+) -> impl Stream<Item = Evento> {
     iced::stream::channel(64, move |mut saida| async move {
         let filho = tokio::process::Command::new("claude")
             .args([
@@ -33,6 +37,7 @@ pub fn conversa(pasta: PathBuf, modo: &'static str) -> impl Stream<Item = Evento
                 "--permission-mode",
                 modo,
             ])
+            .args(retomar.iter().flat_map(|id| ["--resume", id.as_str()]))
             .current_dir(&pasta)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -379,8 +384,135 @@ pub fn exemplo() -> Vec<Item> {
     ]
 }
 
+/// Conversa guardada pelo Claude Code em `~/.claude/projects/<pasta>/<id>.jsonl`.
+#[derive(Debug, Clone)]
+pub struct Sessao {
+    pub id: String,
+    pub titulo: String,
+    pub quando: u64,
+}
+
+/// Pasta onde o Claude Code guarda as conversas desta pasta: o caminho com tudo que não é letra ou
+/// algarismo ASCII trocado por `-`.
+fn pasta_sessoes(raiz: &Path) -> Option<PathBuf> {
+    let nome: String = raiz
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    Some(dirs::home_dir()?.join(".claude/projects").join(nome))
+}
+
+/// O que a pessoa escreveu, sem o contexto do editor que o FeatherCode junta; `None` para o que não é dela.
+fn texto_do_usuario(v: &Value) -> Option<String> {
+    if v["isMeta"] == true || v["isSidechain"] == true {
+        return None;
+    }
+    let texto = match &v["message"]["content"] {
+        Value::String(s) => s.clone(),
+        Value::Array(a) if a.iter().all(|x| x["type"] == "text") => a
+            .iter()
+            .filter_map(|x| x["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => return None,
+    };
+    if let Some(i) = texto.find("<command-name>") {
+        let resto = &texto[i + "<command-name>".len()..];
+        return resto.split("</command-name>").next().map(String::from);
+    }
+    if texto.starts_with('<') {
+        return None;
+    }
+    let texto = texto
+        .split("\n\n<contexto_do_editor>")
+        .next()
+        .unwrap_or_default()
+        .trim();
+    (!texto.is_empty()).then(|| texto.to_string())
+}
+
+/// Conversas desta pasta, da mais nova para a mais velha.
+pub fn sessoes(raiz: &Path) -> Vec<Sessao> {
+    let Some(pasta) = pasta_sessoes(raiz) else {
+        return Vec::new();
+    };
+    let Ok(itens) = std::fs::read_dir(pasta) else {
+        return Vec::new();
+    };
+    let mut v: Vec<Sessao> = itens
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
+        .filter_map(|e| {
+            let quando = e
+                .metadata()
+                .ok()?
+                .modified()
+                .ok()?
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()?
+                .as_secs();
+            let texto = std::fs::read_to_string(e.path()).ok()?;
+            let titulo = texto
+                .lines()
+                .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+                .filter(|v| v["type"] == "user")
+                .find_map(|v| texto_do_usuario(&v))?;
+            Some(Sessao {
+                id: e.path().file_stem()?.to_string_lossy().into_owned(),
+                titulo: titulo
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .chars()
+                    .take(70)
+                    .collect(),
+                quando,
+            })
+        })
+        .collect();
+    v.sort_by_key(|s| std::cmp::Reverse(s.quando));
+    v.truncate(60);
+    v
+}
+
+/// Os passos de uma conversa guardada, para mostrar antes de continuar com `--resume`.
+pub fn sinais_da_sessao(raiz: &Path, id: &str) -> Vec<Sinal> {
+    let Some(arquivo) = pasta_sessoes(raiz).map(|p| p.join(format!("{id}.jsonl"))) else {
+        return Vec::new();
+    };
+    let texto = std::fs::read_to_string(arquivo).unwrap_or_default();
+    let mut sinais = Vec::new();
+    for v in texto
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+    {
+        if v["isSidechain"] == true {
+            continue;
+        }
+        if v["type"] == "user" {
+            if let Some(t) = texto_do_usuario(&v) {
+                sinais.push(Sinal::Item(Item::Eu(t)));
+                continue;
+            }
+        }
+        sinais.extend(interpretar(&v));
+    }
+    sinais
+}
+
 #[cfg(test)]
 mod testes {
+    #[test]
+    fn titulo_da_sessao_sem_o_contexto_do_editor() {
+        let v = serde_json::json!({"type": "user", "message": {"content": "eai\n\n<contexto_do_editor>\nArquivo aberto\n</contexto_do_editor>"}});
+        assert_eq!(super::texto_do_usuario(&v).as_deref(), Some("eai"));
+        let c = serde_json::json!({"type": "user", "message": {"content": "<command-message>init</command-message>\n<command-name>/init</command-name>"}});
+        assert_eq!(super::texto_do_usuario(&c).as_deref(), Some("/init"));
+        let meta = serde_json::json!({"type": "user", "isMeta": true, "message": {"content": "x"}});
+        assert_eq!(super::texto_do_usuario(&meta), None);
+    }
+
     use super::*;
 
     // Linhas reais do claude 2.1.304 (encurtadas), capturadas ao criar o FeatherCode.

@@ -150,6 +150,8 @@ enum Msg {
     Tamanho(Size),
     Capturar,
     Detalhes,
+    Historico,
+    Retomar(String),
     IrInicio,
     Ini(inicio::Ini),
     Link(markdown::Url),
@@ -214,6 +216,10 @@ struct Code {
     buscando: bool,
     git: Option<Result<Vec<(String, PathBuf)>, String>>,
     menu: Option<usize>,
+    /// Conversa guardada que o próximo `claude` continua (`--resume`).
+    retomar: Option<String>,
+    /// Lista do histórico à mostra no painel do agente.
+    historico: Option<Vec<agente::Sessao>>,
     /// Texto do campo "Procurar arquivo" do explorador.
     filtro: String,
     /// Lida na primeira letra do filtro; vazia de novo quando a pasta muda.
@@ -268,6 +274,8 @@ impl Code {
             buscando: false,
             git: None,
             menu: None,
+            retomar: None,
+            historico: None,
             filtro: String::new(),
             todos_arquivos: Vec::new(),
         };
@@ -288,6 +296,9 @@ impl Code {
             .and_then(|v| v.parse().ok())
         {
             code.menu = Some(i);
+        }
+        if std::env::var_os("FEATHERCODE_CAPTURAR_HISTORICO").is_some() {
+            code.historico = Some(agente::sessoes(&code.arvore.raiz));
         }
         if std::env::var_os("FEATHERCODE_CAPTURAR_EXEMPLO").is_some() {
             code.itens = agente::exemplo();
@@ -324,7 +335,11 @@ impl Code {
             window::resize_events().map(|(_, s)| Msg::Tamanho(s)),
         ];
         if self.ligado {
-            let conversa = agente::conversa(self.arvore.raiz.clone(), self.modo.id());
+            let conversa = agente::conversa(
+                self.arvore.raiz.clone(),
+                self.modo.id(),
+                self.retomar.clone(),
+            );
             subs.push(
                 Subscription::run_with_id(("agente", self.conversa), conversa).map(Msg::Agente),
             );
@@ -695,8 +710,24 @@ impl Code {
                 self.itens.clear();
                 self.ocupado = false;
                 self.contexto = (0, 0);
+                self.retomar = None;
+                self.historico = None;
             }
             Msg::Detalhes => self.detalhes = !self.detalhes,
+            Msg::Historico => {
+                self.historico = match self.historico {
+                    Some(_) => None,
+                    None => Some(agente::sessoes(&self.arvore.raiz)),
+                };
+            }
+            Msg::Retomar(id) => {
+                let _ = self.update(Msg::NovaConversa);
+                for s in agente::sinais_da_sessao(&self.arvore.raiz, &id) {
+                    self.sinal(s);
+                }
+                self.ocupado = false;
+                self.retomar = Some(id);
+            }
             Msg::Modo(m) => {
                 self.modo = m;
                 if self.canal.is_some() {
@@ -1259,6 +1290,7 @@ impl Code {
             row![
                 text(titulo).size(13).font(NEGRITO),
                 horizontal_space(),
+                botao_icone("history", Msg::Historico),
                 botao_icone("info-circle", Msg::Detalhes),
                 botao_icone("plus", Msg::NovaConversa),
             ]
@@ -1279,7 +1311,9 @@ impl Code {
         if self.detalhes {
             corpo = corpo.push(self.detalhes_view());
         }
-        if self.itens.is_empty() {
+        if let Some(lista) = &self.historico {
+            corpo = corpo.push(historico_view(lista));
+        } else if self.itens.is_empty() {
             corpo = corpo.push(
                 column![
                     text("Peça uma mudança ou pergunte sobre o código.").size(13),
@@ -1893,6 +1927,42 @@ fn nome_modelo(id: &str) -> String {
         nome.push_str(&versao.join("."));
     }
     nome
+}
+
+/// Conversas guardadas desta pasta; clicar continua a conversa.
+fn historico_view(lista: &[agente::Sessao]) -> Element<'_, Msg> {
+    let agora = config::agora();
+    let mut c = Column::new().spacing(2).push(
+        text("CONVERSAS DESTA PASTA")
+            .size(10)
+            .font(NEGRITO)
+            .color(COR_TEXTO_MUTED()),
+    );
+    if lista.is_empty() {
+        c = c.push(
+            text("Nenhuma conversa guardada ainda.")
+                .size(12)
+                .color(COR_TEXTO_MUTED()),
+        );
+    }
+    for s in lista {
+        c = c.push(
+            button(
+                column![
+                    text(&s.titulo).size(13),
+                    text(config::ha_quanto(s.quando, agora))
+                        .size(11)
+                        .color(COR_TEXTO_MUTED())
+                ]
+                .spacing(1),
+            )
+            .on_press(Msg::Retomar(s.id.clone()))
+            .width(Length::Fill)
+            .padding([6, 8])
+            .style(|_, st| item_lista(false, st, 6.0)),
+        );
+    }
+    c.into()
 }
 
 fn barra(rotulo: &str, fracao: f32, valor: String) -> Element<'_, Msg> {
