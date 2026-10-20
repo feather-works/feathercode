@@ -444,7 +444,7 @@ impl Code {
                 | Msg::Rodou(_)
                 | Msg::Git(_)
                 | Msg::Achados(_)
-                | Msg::Ini(inicio::Ini::ClaudeVersao(_))
+                | Msg::Ini(inicio::Ini::ClaudeVersao(_) | inicio::Ini::OutrosAgentes(_))
         ) {
             self.menu = None;
         }

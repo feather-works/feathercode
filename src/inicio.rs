@@ -27,6 +27,7 @@ pub enum Ini {
     Clonar,
     Clonado(Result<PathBuf, String>),
     ClaudeVersao(Option<String>),
+    OutrosAgentes(Vec<(&'static str, String)>),
     Comecar,
 }
 
@@ -57,6 +58,7 @@ pub struct Estado {
     clonando: bool,
     /// `None` enquanto confere; `Some(None)` = não achou o `claude`.
     claude: Option<Option<String>>,
+    outros: Vec<(&'static str, String)>,
     recentes: Vec<LinhaRecente>,
 }
 
@@ -71,32 +73,50 @@ impl Estado {
             url: String::new(),
             clonando: false,
             claude: None,
+            outros: Vec::new(),
             recentes: Vec::new(),
         }
     }
 }
 
-/// Confere se o `claude` está instalado, para o cartão da página inicial.
-pub fn conferir_claude() -> Task<Msg> {
-    Task::perform(
-        async {
-            let saida = tokio::process::Command::new("claude")
-                .arg("--version")
-                .output()
-                .await
-                .ok()?;
-            let texto = String::from_utf8_lossy(&saida.stdout).into_owned();
-            saida.status.success().then(|| {
-                texto
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or_default()
-                    .to_string()
-            })
-        },
-        |v| Msg::Ini(Ini::ClaudeVersao(v)),
-    )
+/// Versão de um programa pelo `--version`: a primeira palavra que começa com algarismo.
+async fn versao(programa: &str) -> Option<String> {
+    let saida = tokio::process::Command::new(programa)
+        .arg("--version")
+        .output()
+        .await
+        .ok()?;
+    let texto = String::from_utf8_lossy(&saida.stdout).into_owned();
+    saida.status.success().then(|| {
+        texto
+            .split_whitespace()
+            .find(|p| p.starts_with(|c: char| c.is_ascii_digit()))
+            .unwrap_or_default()
+            .to_string()
+    })
 }
+
+/// Confere o Claude Code e os outros agentes de linha de comando instalados.
+pub fn conferir_claude() -> Task<Msg> {
+    Task::batch([
+        Task::perform(versao("claude"), |v| Msg::Ini(Ini::ClaudeVersao(v))),
+        Task::perform(
+            async {
+                let mut v = Vec::new();
+                for (nome, programa) in OUTROS_AGENTES {
+                    if let Some(ver) = versao(programa).await {
+                        v.push((nome, ver));
+                    }
+                }
+                v
+            },
+            |v| Msg::Ini(Ini::OutrosAgentes(v)),
+        ),
+    ])
+}
+
+/// Agentes que a tela reconhece, mas que o painel ainda não sabe conduzir.
+const OUTROS_AGENTES: [(&str, &str); 2] = [("Codex", "codex"), ("Antigravity", "agy")];
 
 /// Nome da pasta do clone: o fim do endereço sem `.git`.
 fn nome_do_repositorio(url: &str) -> Option<&str> {
@@ -280,6 +300,7 @@ impl Code {
                 }
             }
             Ini::ClaudeVersao(v) => self.ini.claude = Some(v),
+            Ini::OutrosAgentes(v) => self.ini.outros = v,
             Ini::Comecar => {
                 self.config.boas_vindas = true;
                 self.config.gravar();
@@ -677,7 +698,25 @@ impl Code {
             },
             ..fundo(fundo_claude)
         });
-        claude.into()
+        let mut col = column![claude].spacing(4);
+        for (nome, v) in &self.ini.outros {
+            col = col.push(
+                row![
+                    text("●").size(10).color(COR_TEXTO_MUTED()),
+                    column![
+                        text(format!("{nome} {v}")).size(12).font(NEGRITO),
+                        text("Instalado; o painel ainda não conversa com ele.")
+                            .size(11)
+                            .color(COR_TEXTO_MUTED())
+                    ]
+                    .spacing(1)
+                ]
+                .spacing(10)
+                .padding([4, 10])
+                .align_y(Alignment::Center),
+            );
+        }
+        col.into()
     }
 
     /// Primeira abertura: tema, Claude Code e pasta dos projetos.
