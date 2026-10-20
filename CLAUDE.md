@@ -37,3 +37,64 @@ Colors, theme, icons, window chrome and the suite brand come from `feather-ui`, 
 - Known limits are marked `// shortcut: <limit>, <when to upgrade>`.
 - File dialogs use `rfd` with `xdg-portal` (no GTK).
 - Commits are prefixed with `claude:` plus a short description in Portuguese.
+
+## Fila de trabalho (anotada em 19/10/2026, pedidos do usuário)
+
+Regra que vale para tudo: tela nova é desenhada no artifact primeiro
+(https://claude.ai/artifact/Vg5ygNrD6ZpHo9NGmk629q) e só vira código depois de aprovada.
+
+**Git (referência: painel Source Control do VS Code, prints de 19/10)**
+- [x] Pull, Push, Fetch (rodam numa aba do terminal) e Commit com mensagem (`add -A` + commit).
+- [x] Clicar numa mudança mostra a diferença contra o último commit (em linha, com +/−).
+- [ ] Diferença **lado a lado** (antes | depois, faixa hachurada onde não há linha), como o VS Code;
+      a em linha fica como opção.
+- [ ] No Gráfico, clicar num commit abre a lista de arquivos dele; clicar no arquivo mostra a
+      diferença daquele commit (`git show <hash> -- arquivo`).
+- [ ] Ctrl+Enter faz o commit; botão Commit com seta: "Commit e Push", "Commit (só o preparado)".
+- [ ] Preparar/despreparar arquivo por arquivo (+ / −), como "Staged Changes".
+
+**Explorador**
+- [ ] Ícone por tipo de arquivo (`.py`, `.rs`, `.env`, `.gitignore`, `.md`, `.txt`…).
+- [ ] Botões no topo: novo arquivo, nova pasta, atualizar, recolher tudo.
+
+**Agentes**
+- [ ] Trocar o agente no rodapé do painel ("Claude Code" vira seletor): Codex (app-server
+      JSON-RPC) e Antigravity (`agy` headless stream-json; não pede permissão no modo headless —
+      decidir com o usuário). Hoje só o Claude Code conversa.
+
+**Configurações**
+- [ ] Engrenagem no fim do trilho + Ctrl+, ; padrão da suíte (`feather_ui::configuracoes`,
+      como o FeatherSheet). Seções propostas: Aparência, Editor, Terminal, Agentes de IA,
+      Projetos, Atalhos, Sobre. Desenhar no artifact antes.
+
+**Editor**
+- [ ] Dois arquivos lado a lado (dividir o editor).
+- [ ] Prévia de Markdown; prévia de HTML (abrir no navegador).
+
+**Menus — triagem dos menus do VS Code (19/10). Regra 3: só entra o que funcionar.**
+- Vale fazer:
+  - Arquivo: Novo arquivo (Ctrl+N), Abrir arquivo, Abrir recente ▸, Salvar como, Salvar tudo,
+    Salvamento automático, Reverter arquivo, Fechar pasta, Sair (Ctrl+Q).
+  - Editar: Desfazer/Refazer, Recortar/Copiar/Colar, Localizar (Ctrl+F), Substituir (Ctrl+H),
+    Buscar/Substituir nos arquivos, Comentar linha (também Ctrl+/).
+  - Seleção: Selecionar tudo, Mover linha (Alt+↑/↓), Copiar linha (Shift+Alt+↑/↓).
+  - Exibir: Paleta de comandos (Ctrl+Shift+P), Explorador/Buscar/Git (Ctrl+Shift+E/F/G),
+    Terminal (Ctrl+`), Quebra de linha (Alt+Z), Layout do editor (dividir).
+  - Ir: Ir para arquivo (Ctrl+P, já existe), Ir para linha (Ctrl+G), Voltar/Avançar.
+  - Terminal: Dividir terminal, Rodar arquivo ativo, Rodar texto selecionado.
+  - Depois: Problemas (erros do `cargo check`/linters na lista, clicar leva à linha).
+- Não vale (por ora):
+  - Workspaces (adicionar pasta ao workspace, salvar/duplicar workspace), perfis, Compartilhar,
+    Emmet, Extensões.
+  - Multicursor (Ctrl+D, cursor acima/abaixo, seleção em coluna): o `text_editor` do Iced 0.13
+    não tem; só com editor próprio.
+  - Expandir/encolher seleção: precisa da árvore de sintaxe.
+  - Depurador (breakpoints, passo a passo, Debug Console): exige DAP, é projeto à parte.
+  - Tarefas (`tasks.json`, Run Task, Configure Tasks): o botão Rodar já cobre.
+- Confiança na pasta (Workspace Trust): a tela inteira do VS Code não faz sentido aqui (não há
+  extensões nem configurações da pasta). Talvez só uma confirmação antes do Rodar numa pasta
+  clonada que nunca foi rodada.
+
+**Lançador e cor**
+- [ ] Lançador: página de primeira instalação (rodar em segundo plano?) e redesenho, no artifact.
+- [ ] Cor do FeatherCode: roxo hoje; Petróleo `#2b7a78` proposto, sem decisão.

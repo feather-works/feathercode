@@ -180,6 +180,102 @@ pub async fn commit(raiz: PathBuf, mensagem: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Uma linha da diferença: `tipo` é '+', '-', ' ' ou '@' (começo de trecho).
+#[derive(Debug, Clone)]
+pub struct LinhaDiff {
+    pub tipo: char,
+    pub antes: Option<usize>,
+    pub depois: Option<usize>,
+    pub texto: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct Diff {
+    pub caminho: PathBuf,
+    pub linhas: Vec<LinhaDiff>,
+}
+
+/// Diferença do arquivo contra o último commit; arquivo novo (ou repositório sem commit) aparece todo como adicionado.
+pub async fn diff_git(raiz: PathBuf, caminho: PathBuf) -> Result<Diff, String> {
+    let rodar = |args: Vec<&std::ffi::OsStr>| {
+        tokio::process::Command::new("git")
+            .args(args)
+            .current_dir(&raiz)
+            .output()
+    };
+    let saida = rodar(vec!["diff".as_ref(), "HEAD".as_ref(), "--".as_ref(), caminho.as_os_str()])
+        .await
+        .map_err(|e| format!("Não deu para rodar o git: {e}"))?;
+    let mut texto = String::from_utf8_lossy(&saida.stdout).into_owned();
+    if texto.trim().is_empty() && caminho.exists() {
+        // `--no-index` sai com código 1 quando há diferença: o que vale é a saída.
+        let novo = rodar(vec![
+            "diff".as_ref(),
+            "--no-index".as_ref(),
+            "--".as_ref(),
+            "/dev/null".as_ref(),
+            caminho.as_os_str(),
+        ])
+        .await
+        .map_err(|e| format!("Não deu para rodar o git: {e}"))?;
+        texto = String::from_utf8_lossy(&novo.stdout).into_owned();
+    }
+    Ok(Diff {
+        caminho,
+        linhas: ler_diff(&texto),
+    })
+}
+
+fn ler_diff(s: &str) -> Vec<LinhaDiff> {
+    let mut v = Vec::new();
+    let (mut a, mut d) = (0, 0);
+    let mut dentro = false;
+    for l in s.lines() {
+        if let Some(resto) = l.strip_prefix("@@ ") {
+            // "@@ -12,5 +12,7 @@ fn x()": onde o trecho começa em cada lado.
+            let mut partes = resto.split_whitespace();
+            let num = |p: Option<&str>| {
+                p.and_then(|p| p[1..].split(',').next()?.parse::<usize>().ok())
+                    .unwrap_or(1)
+            };
+            a = num(partes.next());
+            d = num(partes.next());
+            let contexto = resto.splitn(2, "@@").nth(1).unwrap_or("").trim();
+            v.push(LinhaDiff {
+                tipo: '@',
+                antes: None,
+                depois: None,
+                texto: contexto.to_string(),
+            });
+            dentro = true;
+            continue;
+        }
+        if !dentro || l.starts_with('\\') {
+            continue;
+        }
+        let (tipo, texto) = l.split_at(l.len().min(1));
+        let tipo = tipo.chars().next().unwrap_or(' ');
+        let (antes, depois) = match tipo {
+            '+' => (None, Some(d)),
+            '-' => (Some(a), None),
+            _ => (Some(a), Some(d)),
+        };
+        if tipo != '+' {
+            a += 1;
+        }
+        if tipo != '-' {
+            d += 1;
+        }
+        v.push(LinhaDiff {
+            tipo,
+            antes,
+            depois,
+            texto: texto.replace('\t', "    "),
+        });
+    }
+    v
+}
+
 async fn mudancas_git(raiz: &Path) -> Result<Vec<(String, PathBuf)>, String> {
     let saida = tokio::process::Command::new("git")
         .args(["status", "--porcelain=v1", "-uall"])
@@ -513,7 +609,7 @@ impl Code {
                             ]
                             .spacing(6),
                         )
-                        .on_press(Msg::AbrirArquivo(p.clone()))
+                        .on_press(Msg::VerDiff(p.clone()))
                         .width(Length::Fill)
                         .padding([3, 12])
                         .style(|_, s| item_lista(false, s, 0.0)),
@@ -854,6 +950,26 @@ pub fn nome_tema(t: highlighter::Theme) -> &'static str {
 
 #[cfg(test)]
 mod testes {
+    #[test]
+    fn le_a_diferenca_com_os_numeros_de_linha() {
+        let d = super::ler_diff(
+            "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -3,3 +3,3 @@ fn a()\n um\n-dois\n+2\n tres\n\\ No newline at end of file\n",
+        );
+        let resumo: Vec<_> = d.iter().map(|l| (l.tipo, l.antes, l.depois)).collect();
+        assert_eq!(
+            resumo,
+            [
+                ('@', None, None),
+                (' ', Some(3), Some(3)),
+                ('-', Some(4), None),
+                ('+', None, Some(4)),
+                (' ', Some(5), Some(5)),
+            ]
+        );
+        assert_eq!(d[0].texto, "fn a()");
+        assert_eq!(d[2].texto, "dois");
+    }
+
     #[test]
     fn grafo_separa_desenho_e_commit() {
         let v = super::ler_grafo(

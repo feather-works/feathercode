@@ -168,6 +168,9 @@ enum Msg {
     Achados(Vec<paineis::Achado>),
     IrPara(PathBuf, usize),
     GitAtualizar,
+    VerDiff(PathBuf),
+    Diff(Result<paineis::Diff, String>),
+    FecharDiff,
     /// pull, push ou fetch: rodam no terminal, que mostra a saída e pede a senha se precisar.
     GitRemoto(&'static str),
     MensagemCommit(String),
@@ -218,6 +221,8 @@ struct Code {
     terminal_aberto: bool,
     busca: String,
     mensagem_commit: String,
+    /// Diferença aberta no lugar do editor (clique numa mudança do painel Git).
+    diff: Option<paineis::Diff>,
     achados: Option<Vec<paineis::Achado>>,
     buscando: bool,
     git: Option<Result<paineis::EstadoGit, String>>,
@@ -277,6 +282,7 @@ impl Code {
             terminal_aberto: true,
             busca: String::new(),
             mensagem_commit: String::new(),
+            diff: None,
             achados: None,
             buscando: false,
             git: None,
@@ -315,11 +321,15 @@ impl Code {
         }
         code.atualizar_recentes();
         // FEATHERCODE_CAPTURAR_GIT=1 abre o painel Git na foto.
-        let git = if std::env::var_os("FEATHERCODE_CAPTURAR_GIT").is_some() {
+        // FEATHERCODE_CAPTURAR_DIFF=src/main.rs mostra a diferença desse arquivo.
+        let mut git = if std::env::var_os("FEATHERCODE_CAPTURAR_GIT").is_some() {
             code.update(Msg::Lado(Lado::Git))
         } else {
             Task::none()
         };
+        if let Some(arquivo) = std::env::var_os("FEATHERCODE_CAPTURAR_DIFF") {
+            git = Task::batch([git, code.update(Msg::VerDiff(code.arvore.raiz.join(arquivo)))]);
+        }
         (
             code,
             Task::batch([
@@ -626,6 +636,12 @@ impl Code {
                     Err(e) => self.aviso = e,
                 }
             }
+            Msg::VerDiff(p) => {
+                return Task::perform(paineis::diff_git(self.arvore.raiz.clone(), p), Msg::Diff)
+            }
+            Msg::Diff(Ok(d)) => self.diff = Some(d),
+            Msg::Diff(Err(e)) => self.aviso = e,
+            Msg::FecharDiff => self.diff = None,
             Msg::MensagemCommit(t) => self.mensagem_commit = t,
             Msg::Commit => {
                 let msg = self.mensagem_commit.trim().to_string();
@@ -665,6 +681,7 @@ impl Code {
             Msg::PastaEscolhida(None) => {}
             Msg::Alternar(p) => self.arvore.alternar(&p),
             Msg::AbrirArquivo(p) => {
+                self.diff = None;
                 if let Some(i) = self.abas.iter().position(|a| a.caminho == p) {
                     self.ativa = i;
                 } else {
@@ -709,7 +726,10 @@ impl Code {
                     }
                 }
             }
-            Msg::TrocarAba(i) => self.ativa = i,
+            Msg::TrocarAba(i) => {
+                self.ativa = i;
+                self.diff = None;
+            }
             Msg::FecharAba(i) if i >= self.abas.len() => {}
             Msg::FecharAba(i) => {
                 // shortcut: fecha sem perguntar mesmo com mudança; pedir confirmação no diálogo da suíte depois.
@@ -984,7 +1004,13 @@ impl Code {
     }
 
     fn area_de_trabalho<'a>(&'a self, barra: Element<'a, Msg>) -> Element<'a, Msg> {
-        let mut centro = column![self.abas_view(), self.editor_view()].width(Length::Fill);
+        let mut centro = column![
+            self.abas_view(),
+            match &self.diff {
+                Some(d) => self.diff_view(d),
+                None => self.editor_view(),
+            }
+        ].width(Length::Fill);
         if self.terminal_aberto {
             centro = centro.push(linha_horizontal()).push(self.terminal_view());
         }
@@ -1294,6 +1320,121 @@ impl Code {
         )
         .style(|_| fundo(COR_PAINEL()))
         .into()
+    }
+
+    /// Diferença contra o último commit, em linha (como o modo inline do VS Code).
+    fn diff_view<'a>(&'a self, d: &'a paineis::Diff) -> Element<'a, Msg> {
+        const MAX: usize = 5000;
+        let (mais, menos) = d.linhas.iter().fold((0, 0), |(m, n), l| match l.tipo {
+            '+' => (m + 1, n),
+            '-' => (m, n + 1),
+            _ => (m, n),
+        });
+        let cab = container(
+            row![
+                text(self.relativo(&d.caminho).display().to_string())
+                    .size(13)
+                    .font(NEGRITO),
+                text("alterações desde o último commit")
+                    .size(12)
+                    .color(COR_TEXTO_MUTED()),
+                text(format!("+{mais}")).size(12).font(MONO).color(VERDE),
+                text(format!("−{menos}")).size(12).font(MONO).color(COR_ERRO()),
+                horizontal_space(),
+                botao_texto(
+                    row![icone_traco("file-code", 14.0), text("Abrir arquivo").size(12)]
+                        .spacing(6)
+                        .align_y(Alignment::Center),
+                    Msg::AbrirArquivo(d.caminho.clone()),
+                ),
+                botao_icone("x", Msg::FecharDiff),
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center),
+        )
+        .padding([0, 12])
+        .height(32)
+        .align_y(Alignment::Center)
+        .style(|_| fundo(COR_CROMO_2()));
+        let numero = |n: Option<usize>| {
+            container(
+                text(n.map_or(String::new(), |n| n.to_string()))
+                    .size(TAMANHO_FONTE - 1.0)
+                    .font(MONO)
+                    .color(COR_TEXTO_MUTED()),
+            )
+            .width(44)
+            .align_x(Alignment::End)
+        };
+        let mut lista = Column::new();
+        for l in d.linhas.iter().take(MAX) {
+            let (fundo_linha, sinal, cor_sinal) = match l.tipo {
+                '+' => (VERDE.scale_alpha(0.16), "+", VERDE),
+                '-' => (COR_ERRO().scale_alpha(0.16), "−", COR_ERRO()),
+                '@' => (COR_AZUL_ACENTO().scale_alpha(0.10), "", COR_TEXTO_MUTED()),
+                _ => (Color::TRANSPARENT, "", COR_TEXTO_MUTED()),
+            };
+            let corpo: Element<Msg> = if l.tipo == '@' {
+                text(if l.texto.is_empty() { "⋯".to_string() } else { format!("⋯  {}", l.texto) })
+                    .size(TAMANHO_FONTE - 1.0)
+                    .font(MONO)
+                    .color(COR_TEXTO_MUTED())
+                    .into()
+            } else {
+                text(&l.texto)
+                    .size(TAMANHO_FONTE)
+                    .font(MONO)
+                    .wrapping(Wrapping::None)
+                    .into()
+            };
+            lista = lista.push(
+                container(
+                    row![
+                        numero(l.antes),
+                        numero(l.depois),
+                        container(text(sinal).size(TAMANHO_FONTE).font(MONO).color(cor_sinal))
+                            .width(22)
+                            .align_x(Alignment::Center),
+                        corpo
+                    ]
+                    .spacing(6)
+                    .align_y(Alignment::Center),
+                )
+                .width(Length::Fill)
+                .height(ALTURA_LINHA)
+                .align_y(Alignment::Center)
+                .style(move |_| fundo(fundo_linha)),
+            );
+        }
+        let corpo: Element<Msg> = if d.linhas.is_empty() {
+            container(
+                text("Sem diferença contra o último commit.")
+                    .size(13)
+                    .color(COR_TEXTO_MUTED()),
+            )
+            .center(Length::Fill)
+            .into()
+        } else {
+            if d.linhas.len() > MAX {
+                lista = lista.push(
+                    container(
+                        text(format!("Mostrando as primeiras {MAX} linhas da diferença."))
+                            .size(12)
+                            .color(COR_TEXTO_MUTED()),
+                    )
+                    .padding(10),
+                );
+            }
+            tema::rolagem(lista.padding([6, 0]))
+                .height(Length::Fill)
+                .width(Length::Fill)
+                .style(rolagem_discreta)
+                .into()
+        };
+        column![cab, linha_horizontal(), container(corpo).style(|_| fundo(COR_PAINEL()))]
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
     }
 
     fn agente_view(&self) -> Element<'_, Msg> {
