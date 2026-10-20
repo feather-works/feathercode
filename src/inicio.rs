@@ -27,6 +27,7 @@ pub enum Ini {
     Clonar,
     Clonado(Result<PathBuf, String>),
     ClaudeVersao(Option<String>),
+    Comecar,
 }
 
 /// Item do menu Tecnologia: o índice em `MODELOS`.
@@ -279,11 +280,18 @@ impl Code {
                 }
             }
             Ini::ClaudeVersao(v) => self.ini.claude = Some(v),
+            Ini::Comecar => {
+                self.config.boas_vindas = true;
+                self.config.gravar();
+            }
         }
         Task::none()
     }
 
     pub(crate) fn inicio_view(&self) -> Element<'_, Msg> {
+        if !self.config.boas_vindas {
+            return self.boas_vindas_view();
+        }
         row![
             self.coluna_esquerda(),
             linha_vertical(),
@@ -399,72 +407,11 @@ impl Code {
             );
         }
 
-        let (cor, fundo_claude, titulo, frase): (Color, Color, String, String) = match &e.claude {
-            None => (
-                COR_TEXTO_MUTED(),
-                COR_HOVER(),
-                "Claude Code".into(),
-                "Conferindo se está instalado…".into(),
-            ),
-            Some(Some(v)) => {
-                let uso = self
-                    .uso
-                    .0
-                    .map_or("Pronto para o painel do agente".into(), |u| {
-                        format!("{:.0}% da sessão usada", u * 100.0)
-                    });
-                (
-                    VERDE,
-                    mistura_cor(COR_PAINEL_FAIXA(), VERDE, 0.14),
-                    format!("Claude Code {v}"),
-                    uso,
-                )
-            }
-            Some(None) => (
-                AMARELO,
-                mistura_cor(COR_PAINEL_FAIXA(), AMARELO, 0.14),
-                "Claude Code não encontrado".into(),
-                "Instale o Claude Code para usar o agente.".into(),
-            ),
-        };
-        let claude = container(
-            row![
-                text("●").size(10).color(cor),
-                column![
-                    text(titulo).size(12).font(NEGRITO),
-                    text(frase).size(11).color(COR_TEXTO_MUTED())
-                ]
-                .spacing(1)
-            ]
-            .spacing(10)
-            .align_y(Alignment::Center),
-        )
-        .padding([8, 10])
-        .width(Length::Fill)
-        .style(move |_| container::Style {
-            border: Border {
-                radius: 8.0.into(),
-                ..Default::default()
-            },
-            ..fundo(fundo_claude)
-        });
+        let claude = self.cartao_claude();
 
-        let temas = row![
-            miniatura(Tema::Escuro, self.config.tema),
-            miniatura(Tema::Claro, self.config.tema),
-            miniatura(Tema::Sistema, self.config.tema)
-        ]
-        .spacing(8);
-
-        let corpo = column![
-            marca,
-            acoes,
-            recentes,
-            claude,
-            column![titulo_secao("Aparência"), temas].spacing(6)
-        ]
-        .spacing(20)
-        .padding([22, 20]);
+        let corpo = column![marca, acoes, recentes, claude]
+            .spacing(20)
+            .padding([22, 20]);
         container(
             tema::rolagem(corpo)
                 .style(rolagem_discreta)
@@ -679,6 +626,139 @@ impl Code {
         )
     }
 
+    fn cartao_claude(&self) -> Element<'_, Msg> {
+        let (cor, fundo_claude, titulo, frase): (Color, Color, String, String) =
+            match &self.ini.claude {
+                None => (
+                    COR_TEXTO_MUTED(),
+                    COR_HOVER(),
+                    "Claude Code".into(),
+                    "Conferindo se está instalado…".into(),
+                ),
+                Some(Some(v)) => {
+                    let uso = self
+                        .uso
+                        .0
+                        .map_or("Pronto para o painel do agente".into(), |u| {
+                            format!("{:.0}% da sessão usada", u * 100.0)
+                        });
+                    (
+                        VERDE,
+                        mistura_cor(COR_PAINEL_FAIXA(), VERDE, 0.14),
+                        format!("Claude Code {v}"),
+                        uso,
+                    )
+                }
+                Some(None) => (
+                    AMARELO,
+                    mistura_cor(COR_PAINEL_FAIXA(), AMARELO, 0.14),
+                    "Claude Code não encontrado".into(),
+                    "Para instalar: curl -fsSL https://claude.ai/install.sh | bash".into(),
+                ),
+            };
+        let claude = container(
+            row![
+                text("●").size(10).color(cor),
+                column![
+                    text(titulo).size(12).font(NEGRITO),
+                    text(frase).size(11).color(COR_TEXTO_MUTED())
+                ]
+                .spacing(1)
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center),
+        )
+        .padding([8, 10])
+        .width(Length::Fill)
+        .style(move |_| container::Style {
+            border: Border {
+                radius: 8.0.into(),
+                ..Default::default()
+            },
+            ..fundo(fundo_claude)
+        });
+        claude.into()
+    }
+
+    /// Primeira abertura: tema, Claude Code e pasta dos projetos.
+    fn boas_vindas_view(&self) -> Element<'_, Msg> {
+        let cabecalho = column![
+            pena(56.0),
+            text("Bem-vindo ao FeatherCode").size(19).font(NEGRITO),
+            text("Três escolhas rápidas e você já começa.")
+                .size(12)
+                .color(COR_TEXTO_MUTED()),
+        ]
+        .spacing(6)
+        .align_x(Alignment::Center)
+        .width(Length::Fill);
+        let temas = row![
+            miniatura(Tema::Escuro, self.config.tema),
+            miniatura(Tema::Claro, self.config.tema),
+            miniatura(Tema::Sistema, self.config.tema)
+        ]
+        .spacing(8);
+        let onde = container(
+            row![
+                text(encurtar(&self.onde_criar()))
+                    .size(13)
+                    .width(Length::Fill),
+                link_pequeno("Escolher…", Msg::Ini(Ini::EscolherOnde))
+            ]
+            .align_y(Alignment::Center),
+        )
+        .padding(iced::Padding {
+            top: 3.0,
+            right: 4.0,
+            bottom: 3.0,
+            left: 10.0,
+        })
+        .style(|_| container::Style {
+            border: Border {
+                color: COR_BORDA(),
+                width: 1.0,
+                radius: 6.0.into(),
+            },
+            ..fundo(COR_PAINEL_FAIXA())
+        });
+        let rodape = row![
+            link_pequeno("Pular", Msg::Ini(Ini::Comecar)),
+            horizontal_space(),
+            botao_primario("Começar", Some(Msg::Ini(Ini::Comecar)))
+        ]
+        .align_y(Alignment::Center);
+        let cartao = container(
+            column![
+                cabecalho,
+                passo("1", "Aparência", temas.into()),
+                passo("2", "Agente de IA", self.cartao_claude()),
+                passo("3", "Onde ficam seus projetos", onde.into()),
+                linha_horizontal(),
+                rodape,
+            ]
+            .spacing(22),
+        )
+        .padding(iced::Padding {
+            top: 28.0,
+            right: 30.0,
+            bottom: 22.0,
+            left: 30.0,
+        })
+        .width(560)
+        .style(|_| container::Style {
+            border: Border {
+                color: COR_BORDA(),
+                width: 1.0,
+                radius: 12.0.into(),
+            },
+            ..fundo(COR_PAINEL())
+        });
+        container(cartao)
+            .center(Length::Fill)
+            .style(|_| fundo(COR_CROMO()))
+            .into()
+    }
+
     fn campo_onde(&self) -> Element<'_, Msg> {
         let caixa = container(
             row![
@@ -713,6 +793,27 @@ impl Code {
             text(&self.ini.erro).size(12).color(COR_ERRO()).into()
         }
     }
+}
+
+/// Passo numerado da tela de boas-vindas.
+fn passo<'a>(n: &'a str, titulo: &'a str, conteudo: Element<'a, Msg>) -> Element<'a, Msg> {
+    let numero = container(text(n).size(11).font(NEGRITO).color(COR_AZUL_ACENTO()))
+        .center(22)
+        .style(|_| container::Style {
+            border: Border {
+                radius: 11.0.into(),
+                ..Default::default()
+            },
+            ..fundo(COR_AZUL_FUNDO())
+        });
+    row![
+        numero,
+        column![text(titulo).size(13).font(NEGRITO), conteudo]
+            .spacing(8)
+            .width(Length::Fill)
+    ]
+    .spacing(12)
+    .into()
 }
 
 fn cartao(corpo: Element<'_, Msg>) -> Element<'_, Msg> {
