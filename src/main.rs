@@ -168,6 +168,11 @@ enum Msg {
     Achados(Vec<paineis::Achado>),
     IrPara(PathBuf, usize),
     GitAtualizar,
+    /// pull, push ou fetch: rodam no terminal, que mostra a saída e pede a senha se precisar.
+    GitRemoto(&'static str),
+    MensagemCommit(String),
+    Commit,
+    Commitado(Result<(), String>),
     Git(Result<paineis::EstadoGit, String>),
     Menu(Option<usize>),
     TemaCodigo(usize),
@@ -212,6 +217,7 @@ struct Code {
     agente_aberto: bool,
     terminal_aberto: bool,
     busca: String,
+    mensagem_commit: String,
     achados: Option<Vec<paineis::Achado>>,
     buscando: bool,
     git: Option<Result<paineis::EstadoGit, String>>,
@@ -270,6 +276,7 @@ impl Code {
             agente_aberto: true,
             terminal_aberto: true,
             busca: String::new(),
+            mensagem_commit: String::new(),
             achados: None,
             buscando: false,
             git: None,
@@ -612,6 +619,30 @@ impl Code {
                 return Task::perform(paineis::status_git(self.arvore.raiz.clone()), Msg::Git)
             }
             Msg::Git(r) => self.git = Some(r),
+            Msg::GitRemoto(cmd) => {
+                self.terminal_aberto = true;
+                match self.terminais.rodar_git(&self.arvore.raiz, &format!("git {cmd}")) {
+                    Ok(_) => return self.focar_terminal(),
+                    Err(e) => self.aviso = e,
+                }
+            }
+            Msg::MensagemCommit(t) => self.mensagem_commit = t,
+            Msg::Commit => {
+                let msg = self.mensagem_commit.trim().to_string();
+                if msg.is_empty() {
+                    self.aviso = "Escreva a mensagem do commit.".into();
+                } else {
+                    return Task::perform(
+                        paineis::commit(self.arvore.raiz.clone(), msg),
+                        Msg::Commitado,
+                    );
+                }
+            }
+            Msg::Commitado(Ok(())) => {
+                self.mensagem_commit.clear();
+                return self.update(Msg::GitAtualizar);
+            }
+            Msg::Commitado(Err(e)) => self.aviso = e,
             Msg::AbrirPasta => {
                 return Task::perform(
                     rfd::AsyncFileDialog::new()
@@ -885,7 +916,7 @@ impl Code {
     }
 
     fn view(&self) -> Element<'_, Msg> {
-        // Na página inicial não há pasta aberta: nada de nome nem botão "Início".
+        // Na página inicial não há pasta aberta: nada de nome.
         let pasta = if self.inicio {
             String::new()
         } else {
@@ -894,16 +925,6 @@ impl Code {
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default()
-        };
-        let voltar: Element<Msg> = if self.inicio {
-            Space::with_width(0).into()
-        } else {
-            botao_texto(
-                row![icone_traco("layout-grid", 14.0), text("Início").size(12)]
-                    .spacing(6)
-                    .align_y(Alignment::Center),
-                Msg::IrInicio,
-            )
         };
         let nome = container(
             row![
@@ -916,7 +937,6 @@ impl Code {
                 self.menus_view(),
                 text(pasta).size(13).color(COR_TEXTO_MUTED()),
                 horizontal_space(),
-                voltar,
                 botao_texto(
                     row![
                         icone_traco("folder-open", 14.0),

@@ -161,6 +161,25 @@ pub async fn status_git(raiz: PathBuf) -> Result<EstadoGit, String> {
     Ok(EstadoGit { mudancas, grafo })
 }
 
+/// Prepara tudo e faz o commit; a mensagem vai como argumento, sem passar por shell.
+pub async fn commit(raiz: PathBuf, mensagem: String) -> Result<(), String> {
+    for args in [vec!["add", "-A"], vec!["commit", "-m", &mensagem]] {
+        let s = tokio::process::Command::new("git")
+            .args(&args)
+            .current_dir(&raiz)
+            .output()
+            .await
+            .map_err(|e| format!("Não deu para rodar o git: {e}"))?;
+        if !s.status.success() {
+            let erro = String::from_utf8_lossy(&s.stderr);
+            let saida = String::from_utf8_lossy(&s.stdout);
+            let texto = if erro.trim().is_empty() { saida } else { erro };
+            return Err(format!("git {}: {}", args[0], texto.trim()));
+        }
+    }
+    Ok(())
+}
+
 async fn mudancas_git(raiz: &Path) -> Result<Vec<(String, PathBuf)>, String> {
     let saida = tokio::process::Command::new("git")
         .args(["status", "--porcelain=v1", "-uall"])
@@ -400,8 +419,12 @@ impl Code {
         let topo = row![
             titulo_lado("GIT"),
             horizontal_space(),
+            botao_git("Pull", "pull"),
+            botao_git("Push", "push"),
+            botao_git("Fetch", "fetch --all --prune"),
             botao_icone("refresh", Msg::GitAtualizar)
         ]
+        .spacing(2)
         .align_y(Alignment::Center);
         let ramo = text(
             self.ramo
@@ -416,8 +439,55 @@ impl Code {
                 .padding([0, 12])
                 .into(),
             Some(Ok(g)) => {
-                let mut c =
-                    Column::new().push(subtitulo_git(format!("Mudanças ({})", g.mudancas.len())));
+                let mensagem = text_input("Mensagem do commit", &self.mensagem_commit)
+                    .on_input(Msg::MensagemCommit)
+                    .on_submit(Msg::Commit)
+                    .size(13)
+                    .padding([6, 8])
+                    .style(|t, s| text_input::Style {
+                        border: Border {
+                            color: if matches!(s, text_input::Status::Focused) {
+                                COR_AZUL_ACENTO()
+                            } else {
+                                COR_BORDA()
+                            },
+                            width: 1.0,
+                            radius: 6.0.into(),
+                        },
+                        background: COR_PAINEL().into(),
+                        ..campo_sem_borda(t, s)
+                    });
+                let pode = !g.mudancas.is_empty() && !self.mensagem_commit.trim().is_empty();
+                let commit = button(
+                    container(text("Commit").size(12).font(NEGRITO).color(COR_PAINEL()))
+                        .center_x(Length::Fill),
+                )
+                .on_press_maybe(pode.then_some(Msg::Commit))
+                .width(Length::Fill)
+                .padding([5, 8])
+                .style(move |_, s| button::Style {
+                    background: Some(
+                        if pode && matches!(s, button::Status::Hovered) {
+                            COR_AZUL_ACENTO().scale_alpha(0.85)
+                        } else if pode {
+                            COR_AZUL_ACENTO()
+                        } else {
+                            COR_BORDA()
+                        }
+                        .into(),
+                    ),
+                    border: Border {
+                        radius: 6.0.into(),
+                        ..Border::default()
+                    },
+                    ..button::Style::default()
+                });
+                let mut c = Column::new()
+                    .push(
+                        container(column![mensagem, commit].spacing(6)).padding([4, 12]),
+                    )
+                    .push(Space::with_height(6))
+                    .push(subtitulo_git(format!("Mudanças ({})", g.mudancas.len())));
                 if g.mudancas.is_empty() {
                     c = c.push(
                         container(
@@ -664,6 +734,20 @@ impl Code {
             .into(),
         )
     }
+}
+
+/// Botão de texto do topo do painel Git; o comando roda no terminal.
+fn botao_git(rotulo: &'static str, comando: &'static str) -> Element<'static, Msg> {
+    tooltip(
+        button(text(rotulo).size(11).color(COR_TEXTO_MUTED()))
+            .on_press(Msg::GitRemoto(comando))
+            .padding([2, 6])
+            .style(|_, s| item_lista(false, s, 4.0)),
+        container(text(format!("git {comando}")).size(11).font(MONO)).padding([3, 6]),
+        tooltip::Position::Bottom,
+    )
+    .style(tema::estilo_dica)
+    .into()
 }
 
 fn subtitulo_git(t: String) -> Element<'static, Msg> {

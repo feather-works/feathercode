@@ -14,6 +14,8 @@ pub struct Terminais {
     proximo: u64,
     /// Id do terminal aberto pelo botão Rodar; rodar de novo fecha o anterior.
     rodar: Option<u64>,
+    /// Id do terminal do último pull/push/fetch, trocado a cada comando.
+    git: Option<u64>,
 }
 
 fn shell() -> String {
@@ -86,6 +88,15 @@ impl Terminais {
         }
         let id = self.novo(pasta, Some(comando))?;
         self.rodar = Some(id);
+        Ok(id)
+    }
+
+    pub fn rodar_git(&mut self, pasta: &Path, comando: &str) -> Result<u64, String> {
+        if let Some(id) = self.git.take() {
+            self.fechar(id);
+        }
+        let id = self.novo(pasta, Some(comando))?;
+        self.git = Some(id);
         Ok(id)
     }
 
