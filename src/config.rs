@@ -86,6 +86,10 @@ impl Config {
     }
 
     pub fn gravar(&self) {
+        // A foto de conferência não mexe nos recentes de quem usa o app.
+        if std::env::var_os("FEATHERCODE_CAPTURAR").is_some() {
+            return;
+        }
         let Some(c) = caminho() else { return };
         let lista = |l: &[Recente]| {
             l.iter()

@@ -301,7 +301,7 @@ impl Code {
             "Bom te ver de novo"
         };
         let marca = row![
-            marca::icone_atual(44.0),
+            pena(48.0),
             column![
                 text(saudacao).size(15).font(NEGRITO),
                 text("Abra onde parou ou comece algo novo.")

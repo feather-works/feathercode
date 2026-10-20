@@ -15,8 +15,8 @@ use feather_ui::tema::{
 };
 use iced::widget::text::{LineHeight, Wrapping};
 use iced::widget::{
-    button, column, container, horizontal_space, markdown, pick_list, progress_bar, row,
-    scrollable, stack, text, text_editor, text_input, tooltip, Column, Space,
+    button, column, container, horizontal_space, markdown, mouse_area, pick_list, progress_bar,
+    row, scrollable, stack, text, text_editor, text_input, tooltip, Column, Space,
 };
 use iced::{
     font, highlighter, keyboard, window, Alignment, Background, Border, Color, Element, Font,
@@ -137,6 +137,7 @@ enum Msg {
     Responder(usize, Resposta),
     Comando(String),
     Rodar,
+    FocarTerminal,
     Rodou(String),
     Janela(Option<window::Id>),
     Tamanho(Size),
@@ -520,6 +521,7 @@ impl Code {
                 self.enviar(linha);
             }
             Msg::Comando(c) => self.comando = c,
+            Msg::FocarTerminal => return text_input::focus(text_input::Id::new("terminal")),
             Msg::Rodar => {
                 let cmd = std::mem::take(&mut self.comando);
                 if cmd.trim().is_empty() || self.rodando {
@@ -630,7 +632,7 @@ impl Code {
         };
         let nome = container(
             row![
-                cromo::emblema(),
+                pena(27.0),
                 text("FeatherCode").size(13).font(NEGRITO),
                 text(pasta).size(13).color(COR_TEXTO_MUTED()),
                 horizontal_space(),
@@ -895,6 +897,7 @@ impl Code {
             },
             &self.comando,
         )
+        .id(text_input::Id::new("terminal"))
         .on_input(Msg::Comando)
         .on_submit(Msg::Rodar)
         .font(MONO)
@@ -906,7 +909,8 @@ impl Code {
             .anchor_bottom()
             .height(Length::Fill)
             .width(Length::Fill);
-        container(
+        // Clicar em qualquer ponto do terminal põe o cursor na linha de comando.
+        let painel = container(
             column![
                 text("TERMINAL")
                     .size(11)
@@ -925,8 +929,8 @@ impl Code {
         .padding([8, 14])
         .width(Length::Fill)
         .height(ALTURA_TERMINAL)
-        .style(|_| fundo(COR_PAINEL_FAIXA()))
-        .into()
+        .style(|_| fundo(COR_PAINEL_FAIXA()));
+        mouse_area(painel).on_press(Msg::FocarTerminal).into()
     }
 
     fn agente_view(&self) -> Element<'_, Msg> {
@@ -1521,6 +1525,23 @@ async fn rodar(cmd: String, pasta: PathBuf) -> String {
     }
 }
 
+/// A pena da marca sem o quadrado de fundo, para ficar sobre a cor do painel.
+fn pena(tamanho: f32) -> iced::widget::Svg<'static> {
+    let svg = marca::svg_para(marca::produto_atual(), true);
+    let sem_fundo = match (
+        svg.find("<rect id=\"fundo-arredondado\""),
+        svg.find("<g id=\"penas\""),
+    ) {
+        (Some(a), Some(b)) if a < b => format!("{}{}", &svg[..a], &svg[b..]),
+        _ => svg,
+    };
+    iced::widget::svg(iced::widget::svg::Handle::from_memory(
+        sem_fundo.into_bytes(),
+    ))
+    .width(tamanho)
+    .height(tamanho)
+}
+
 /// Ramo atual lido do `.git/HEAD`, sem chamar o git.
 fn ramo(pasta: &Path) -> Option<String> {
     let head = std::fs::read_to_string(pasta.join(".git/HEAD")).ok()?;
@@ -1699,4 +1720,18 @@ fn rolagem_discreta(t: &iced::Theme, s: scrollable::Status) -> scrollable::Style
         };
     }
     estilo
+}
+
+#[cfg(test)]
+mod testes {
+    #[tokio::test]
+    async fn terminal_roda_na_pasta_e_junta_o_erro() {
+        let s = super::rodar("pwd; echo oi >&2; exit 3".into(), std::env::temp_dir()).await;
+        assert!(
+            s.contains(std::env::temp_dir().to_str().unwrap())
+                && s.contains("oi")
+                && s.contains('3'),
+            "{s}"
+        );
+    }
 }
