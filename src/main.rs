@@ -2,6 +2,7 @@
 mod agente;
 mod arvore;
 mod config;
+mod edicao;
 mod execucao;
 mod inicio;
 mod modelos;
@@ -168,6 +169,10 @@ enum Msg {
     Git(Result<Vec<(String, PathBuf)>, String>),
     Menu(Option<usize>),
     TemaCodigo(usize),
+    Filtro(String),
+    ProcurarArquivo,
+    Recuar(bool),
+    Comentar,
 }
 
 struct Code {
@@ -213,6 +218,10 @@ struct Code {
     buscando: bool,
     git: Option<Result<Vec<(String, PathBuf)>, String>>,
     menu: Option<usize>,
+    /// Texto do campo "Procurar arquivo" do explorador.
+    filtro: String,
+    /// Lida na primeira letra do filtro; vazia de novo quando a pasta muda.
+    todos_arquivos: Vec<PathBuf>,
 }
 
 impl Code {
@@ -266,6 +275,8 @@ impl Code {
             buscando: false,
             git: None,
             menu: None,
+            filtro: String::new(),
+            todos_arquivos: Vec::new(),
         };
         let mut code = code;
         // Modo de captura: FEATHERCODE_CAPTURAR=foto.png fotografa a janela e fecha;
@@ -300,6 +311,7 @@ impl Code {
             keyboard::Key::Character("s") if m.command() => Some(Msg::Salvar),
             keyboard::Key::Character("o") if m.command() => Some(Msg::AbrirPasta),
             keyboard::Key::Character("b") if m.command() => Some(Msg::Lado(Lado::Explorador)),
+            keyboard::Key::Character("p") if m.command() => Some(Msg::ProcurarArquivo),
             keyboard::Key::Named(keyboard::key::Named::F5) => Some(Msg::RodarProjeto),
             keyboard::Key::Character("j") if m.command() => Some(Msg::AlternarTerminal),
             keyboard::Key::Character("f" | "F") if m.command() && m.shift() => {
@@ -450,6 +462,8 @@ impl Code {
         self.inicio = false;
         self.aviso.clear();
         self.achados = None;
+        self.filtro.clear();
+        self.todos_arquivos.clear();
         self.git = None;
         self.update(Msg::NovaConversa)
     }
@@ -473,6 +487,51 @@ impl Code {
         }
         match msg {
             Msg::Menu(m) => self.menu = m,
+            Msg::Filtro(f) => {
+                if self.todos_arquivos.is_empty() && !f.trim().is_empty() {
+                    self.todos_arquivos = paineis::arquivos(&self.arvore.raiz);
+                }
+                self.filtro = f;
+            }
+            Msg::ProcurarArquivo => {
+                self.lado = Some(Lado::Explorador);
+                return text_input::focus(text_input::Id::new("filtro"));
+            }
+            Msg::Recuar(mais) => {
+                let Some(aba) = self.abas.get_mut(self.ativa) else {
+                    return Task::none();
+                };
+                // Tab sem seleção só põe espaços no cursor, como em qualquer editor.
+                if mais && aba.conteudo.selection().is_none() {
+                    for _ in 0..4 {
+                        aba.conteudo
+                            .perform(text_editor::Action::Edit(text_editor::Edit::Insert(' ')));
+                    }
+                } else {
+                    let (ini, fim) = edicao::linhas_da_selecao(&aba.conteudo);
+                    let (_, col) = aba.conteudo.cursor_position();
+                    let novo = edicao::recuar(&aba.conteudo.text(), ini, fim, mais);
+                    let col = if mais { col + 4 } else { col.saturating_sub(4) };
+                    edicao::trocar_texto(&mut aba.conteudo, &novo, ini, fim, col);
+                }
+                aba.sujo = true;
+                aba.maior = maior_linha(&aba.conteudo.text());
+            }
+            Msg::Comentar => {
+                let Some(aba) = self.abas.get_mut(self.ativa) else {
+                    return Task::none();
+                };
+                let Some(marca) = edicao::marca_comentario(&aba.caminho) else {
+                    self.aviso = "Não sei comentar este tipo de arquivo.".into();
+                    return Task::none();
+                };
+                let (ini, fim) = edicao::linhas_da_selecao(&aba.conteudo);
+                let (_, col) = aba.conteudo.cursor_position();
+                let novo = edicao::comentar(&aba.conteudo.text(), ini, fim, marca);
+                edicao::trocar_texto(&mut aba.conteudo, &novo, ini, fim, col);
+                aba.sujo = true;
+                aba.maior = maior_linha(&aba.conteudo.text());
+            }
             Msg::Lado(l) => {
                 self.lado = if self.lado == Some(l) && l != Lado::Buscar {
                     None
@@ -733,6 +792,10 @@ impl Code {
                         self.rodando = false;
                         self.parar = None;
                         self.arvore.recarregar();
+                        self.todos_arquivos.clear();
+                        if !self.filtro.trim().is_empty() {
+                            self.todos_arquivos = paineis::arquivos(&self.arvore.raiz);
+                        }
                     }
                 }
                 // shortcut: guarda só o fim da saída; um terminal de verdade (PTY) substitui isto.
@@ -957,9 +1020,72 @@ impl Code {
         .size(11)
         .font(NEGRITO)
         .color(COR_TEXTO_MUTED());
+        let filtro = text_input("Procurar arquivo", &self.filtro)
+            .id(text_input::Id::new("filtro"))
+            .on_input(Msg::Filtro)
+            .size(12)
+            .padding([5, 8])
+            .style(|t, s| text_input::Style {
+                border: Border {
+                    color: if matches!(s, text_input::Status::Focused) {
+                        COR_AZUL_ACENTO()
+                    } else {
+                        COR_BORDA()
+                    },
+                    width: 1.0,
+                    radius: 6.0.into(),
+                },
+                background: COR_PAINEL().into(),
+                ..campo_sem_borda(t, s)
+            });
+        // Com o filtro, a lista vira os arquivos de todas as pastas cujo nome contém o texto.
+        let lista: Element<Msg> = if self.filtro.trim().is_empty() {
+            Column::with_children(linhas).into()
+        } else {
+            let termo = self.filtro.trim().to_lowercase();
+            let achados = self.todos_arquivos.iter().filter(|p| {
+                p.file_name()
+                    .is_some_and(|n| n.to_string_lossy().to_lowercase().contains(&termo))
+            });
+            let itens: Vec<Element<Msg>> = achados
+                .take(300)
+                .map(|p| {
+                    let rel = self.relativo(p);
+                    let pai = rel
+                        .parent()
+                        .map(|x| x.display().to_string())
+                        .unwrap_or_default();
+                    let nome = rel
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    let ativo = aberto == Some(p.as_path());
+                    button(column![
+                        text(nome).size(13),
+                        text(pai).size(11).color(COR_TEXTO_MUTED())
+                    ])
+                    .on_press(Msg::AbrirArquivo(p.clone()))
+                    .width(Length::Fill)
+                    .padding([3, 12])
+                    .style(move |_, s| item_lista(ativo, s, 0.0))
+                    .into()
+                })
+                .collect();
+            if itens.is_empty() {
+                container(
+                    text("Nenhum arquivo com esse nome.")
+                        .size(12)
+                        .color(COR_TEXTO_MUTED()),
+                )
+                .padding([4, 12])
+                .into()
+            } else {
+                Column::with_children(itens).into()
+            }
+        };
         container(column![
-            container(titulo).padding([10, 12]),
-            tema::rolagem(Column::with_children(linhas))
+            container(column![titulo, filtro].spacing(8)).padding([10, 12]),
+            tema::rolagem(lista)
                 .height(Length::Fill)
                 .style(rolagem_discreta)
         ])
@@ -1095,6 +1221,21 @@ impl Code {
         let cores = self.tema_codigo();
         let editor = text_editor(&aba.conteudo)
             .on_action(Msg::Editar)
+            .key_binding(|k| {
+                use text_editor::Binding;
+                if k.status != text_editor::Status::Focused {
+                    return None;
+                }
+                match k.key.as_ref() {
+                    keyboard::Key::Named(keyboard::key::Named::Tab) => {
+                        Some(Binding::Custom(Msg::Recuar(!k.modifiers.shift())))
+                    }
+                    keyboard::Key::Character(";") if k.modifiers.command() => {
+                        Some(Binding::Custom(Msg::Comentar))
+                    }
+                    _ => Binding::from_key_press(k),
+                }
+            })
             .font(MONO)
             .size(TAMANHO_FONTE)
             .line_height(LineHeight::Absolute(ALTURA_LINHA.into()))

@@ -20,10 +20,11 @@ pub struct Achado {
     pub texto: String,
 }
 
-/// Procura `termo` (sem diferenciar maiúsculas) nos arquivos de texto da pasta.
-pub fn buscar(raiz: &Path, termo: &str) -> Vec<Achado> {
-    let termo = termo.to_lowercase();
-    let mut achados = Vec::new();
+/// Todos os arquivos da pasta (sem as pastas ignoradas), na ordem da árvore.
+pub fn arquivos(raiz: &Path) -> Vec<PathBuf> {
+    // shortcut: teto fixo para pasta gigante; ler em segundo plano se um projeto real passar disso.
+    const MAX_ARQUIVOS: usize = 50_000;
+    let mut v = Vec::new();
     let mut pilha = vec![raiz.to_path_buf()];
     while let Some(pasta) = pilha.pop() {
         let Ok(itens) = std::fs::read_dir(&pasta) else {
@@ -41,25 +42,35 @@ pub fn buscar(raiz: &Path, termo: &str) -> Vec<Achado> {
             }
             if p.is_dir() {
                 pilha.push(p);
-                continue;
+            } else if v.len() < MAX_ARQUIVOS {
+                v.push(p);
             }
-            // Arquivo grande ou binário não entra.
-            if p.metadata().map_or(true, |m| m.len() > 2_000_000) {
-                continue;
-            }
-            let Ok(texto) = std::fs::read_to_string(&p) else {
-                continue;
-            };
-            for (i, l) in texto.lines().enumerate() {
-                if l.to_lowercase().contains(&termo) {
-                    achados.push(Achado {
-                        caminho: p.clone(),
-                        linha: i,
-                        texto: l.trim().chars().take(160).collect(),
-                    });
-                    if achados.len() >= MAX_ACHADOS {
-                        return achados;
-                    }
+        }
+    }
+    v
+}
+
+/// Procura `termo` (sem diferenciar maiúsculas) nos arquivos de texto da pasta.
+pub fn buscar(raiz: &Path, termo: &str) -> Vec<Achado> {
+    let termo = termo.to_lowercase();
+    let mut achados = Vec::new();
+    for p in arquivos(raiz) {
+        // Arquivo grande ou binário não entra.
+        if p.metadata().map_or(true, |m| m.len() > 2_000_000) {
+            continue;
+        }
+        let Ok(texto) = std::fs::read_to_string(&p) else {
+            continue;
+        };
+        for (i, l) in texto.lines().enumerate() {
+            if l.to_lowercase().contains(&termo) {
+                achados.push(Achado {
+                    caminho: p.clone(),
+                    linha: i,
+                    texto: l.trim().chars().take(160).collect(),
+                });
+                if achados.len() >= MAX_ACHADOS {
+                    return achados;
                 }
             }
         }
