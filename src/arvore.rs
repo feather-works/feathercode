@@ -20,7 +20,11 @@ pub struct Linha {
 
 impl Arvore {
     pub fn nova(raiz: PathBuf) -> Self {
-        let mut a = Arvore { raiz: raiz.clone(), abertas: HashSet::from([raiz.clone()]), filhos: HashMap::new() };
+        let mut a = Arvore {
+            raiz: raiz.clone(),
+            abertas: HashSet::from([raiz.clone()]),
+            filhos: HashMap::new(),
+        };
         a.ler(&raiz);
         a
     }
@@ -30,10 +34,19 @@ impl Arvore {
             .into_iter()
             .flatten()
             .flatten()
-            .filter(|e| !IGNORADAS.iter().any(|i| e.file_name().to_string_lossy().starts_with(i)))
+            .filter(|e| {
+                !IGNORADAS
+                    .iter()
+                    .any(|i| e.file_name().to_string_lossy().starts_with(i))
+            })
             .map(|e| (e.path(), e.file_type().is_ok_and(|t| t.is_dir())))
             .collect();
-        itens.sort_by_key(|(p, pasta)| (!pasta, p.file_name().map(|n| n.to_string_lossy().to_lowercase())));
+        itens.sort_by_key(|(p, pasta)| {
+            (
+                !pasta,
+                p.file_name().map(|n| n.to_string_lossy().to_lowercase()),
+            )
+        });
         self.filhos.insert(pasta.to_path_buf(), itens);
     }
 
@@ -65,7 +78,12 @@ impl Arvore {
     fn descer(&self, pasta: &Path, nivel: usize, v: &mut Vec<Linha>) {
         for (caminho, e_pasta) in self.filhos.get(pasta).into_iter().flatten() {
             let aberta = *e_pasta && self.abertas.contains(caminho);
-            v.push(Linha { caminho: caminho.clone(), pasta: *e_pasta, nivel, aberta });
+            v.push(Linha {
+                caminho: caminho.clone(),
+                pasta: *e_pasta,
+                nivel,
+                aberta,
+            });
             if aberta {
                 self.descer(caminho, nivel + 1, v);
             }
@@ -88,10 +106,24 @@ mod testes {
             std::fs::write(raiz.join(f), "").unwrap();
         }
         let mut a = Arvore::nova(raiz.clone());
-        let nomes = |a: &Arvore| a.linhas().iter().map(|l| l.caminho.strip_prefix(&raiz).unwrap().to_string_lossy().into_owned()).collect::<Vec<_>>();
+        let nomes = |a: &Arvore| {
+            a.linhas()
+                .iter()
+                .map(|l| {
+                    l.caminho
+                        .strip_prefix(&raiz)
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect::<Vec<_>>()
+        };
         assert_eq!(nomes(&a), ["src", "Zeta", "b.rs", "Cargo.toml"]);
         a.alternar(&raiz.join("src"));
-        assert_eq!(nomes(&a), ["src", "src/main.rs", "Zeta", "b.rs", "Cargo.toml"]);
+        assert_eq!(
+            nomes(&a),
+            ["src", "src/main.rs", "Zeta", "b.rs", "Cargo.toml"]
+        );
         std::fs::remove_dir_all(&raiz).unwrap();
     }
 }

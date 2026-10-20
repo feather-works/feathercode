@@ -14,6 +14,8 @@ iced = { version = "0.13", features = ["svg", "tokio", "highlighter", "markdown"
 # Mesma escolha do FeatherSheet: diálogo nativo pelo portal, sem GTK.
 rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
 serde_json = "1"
+# Pasta de configuração de cada sistema (o launcher usa o mesmo).
+dirs = "6"
 # Só o modo de captura (FEATHERCODE_CAPTURAR) grava PNG.
 image = { version = "0.25", default-features = false, features = ["png"] }
 tokio = { version = "1", features = ["process", "io-util", "macros", "sync", "rt", "time"] }

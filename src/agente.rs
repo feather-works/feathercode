@@ -20,8 +20,19 @@ pub enum Evento {
 pub fn conversa(pasta: PathBuf, modo: &'static str) -> impl Stream<Item = Evento> {
     iced::stream::channel(64, move |mut saida| async move {
         let filho = tokio::process::Command::new("claude")
-            .args(["--output-format", "stream-json", "--input-format", "stream-json", "--verbose"])
-            .args(["--permission-prompt-tool", "stdio", "--permission-mode", modo])
+            .args([
+                "--output-format",
+                "stream-json",
+                "--input-format",
+                "stream-json",
+                "--verbose",
+            ])
+            .args([
+                "--permission-prompt-tool",
+                "stdio",
+                "--permission-mode",
+                modo,
+            ])
             .current_dir(&pasta)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -68,7 +79,10 @@ pub fn conversa(pasta: PathBuf, modo: &'static str) -> impl Stream<Item = Evento
         let texto = erros.await.unwrap_or_default();
         let motivo = match status {
             Ok(s) if s.success() => None,
-            Ok(s) => Some(format!("O claude terminou com erro ({s}). {}", texto.trim())),
+            Ok(s) => Some(format!(
+                "O claude terminou com erro ({s}). {}",
+                texto.trim()
+            )),
             Err(e) => Some(e.to_string()),
         };
         let _ = saida.send(Evento::Encerrado(motivo)).await;
@@ -95,7 +109,8 @@ pub fn negar(request_id: &str) -> String {
 
 /// Pedido do editor para o claude: `interrupt`, `set_permission_mode`…
 pub fn controle(id: u64, pedido: Value) -> String {
-    json!({"type": "control_request", "request_id": format!("feathercode-{id}"), "request": pedido}).to_string()
+    json!({"type": "control_request", "request_id": format!("feathercode-{id}"), "request": pedido})
+        .to_string()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -111,8 +126,19 @@ pub enum Item {
     Eu(String),
     /// Resposta do agente já lida como Markdown.
     Texto(Vec<iced::widget::markdown::Item>),
-    Ferramenta { id: String, frase: String, erro: bool },
-    Pedido { request_id: String, frase: String, previa: Vec<(char, String)>, input: Value, sugestoes: Value, resposta: Resposta },
+    Ferramenta {
+        id: String,
+        frase: String,
+        erro: bool,
+    },
+    Pedido {
+        request_id: String,
+        frase: String,
+        previa: Vec<(char, String)>,
+        input: Value,
+        sugestoes: Value,
+        resposta: Resposta,
+    },
     Aviso(String),
 }
 
@@ -120,33 +146,109 @@ pub enum Item {
 pub enum Sinal {
     Item(Item),
     /// Resultado de uma ferramenta já mostrada (pelo id do `tool_use`).
-    Resultado { id: String, erro: bool },
+    Resultado {
+        id: String,
+        erro: bool,
+    },
     /// Uso da conta, de 0 a 1: janela de 5 horas e de 7 dias.
     Uso(Option<f32>, Option<f32>),
-    Modelo(String),
+    Inicio(Info),
+    /// Tokens que a última resposta ocupou no contexto.
+    Contexto(u64),
+    /// Tamanho da janela de contexto do modelo, informado no fim do turno.
+    JanelaContexto(u64),
     FimDoTurno(Option<String>),
 }
 
+/// O que o claude carregou ao abrir: aparece em "Detalhes da sessão".
+#[derive(Debug, Clone, Default)]
+pub struct Info {
+    pub modelo: String,
+    pub versao: String,
+    /// (nome, estado): connected, pending, needs-auth, failed…
+    pub mcp: Vec<(String, String)>,
+    pub plugins: Vec<String>,
+    pub skills: usize,
+    pub comandos: usize,
+    pub agentes: Vec<String>,
+}
+
+fn nomes(v: &Value) -> Vec<String> {
+    v.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|x| x.as_str().or(x["name"].as_str()))
+        .map(String::from)
+        .collect()
+}
+
 pub fn interpretar(v: &Value) -> Vec<Sinal> {
-    let conteudo = || v["message"]["content"].as_array().cloned().unwrap_or_default();
+    let conteudo = || {
+        v["message"]["content"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    };
     match v["type"].as_str() {
-        Some("system") if v["subtype"] == "init" => v["model"].as_str().map(|m| Sinal::Modelo(m.into())).into_iter().collect(),
-        Some("assistant") => conteudo()
+        Some("system") if v["subtype"] == "init" => vec![Sinal::Inicio(Info {
+            modelo: v["model"].as_str().unwrap_or_default().into(),
+            versao: v["claude_code_version"].as_str().unwrap_or_default().into(),
+            mcp: v["mcp_servers"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|s| {
+                    (
+                        s["name"].as_str().unwrap_or("?").into(),
+                        s["status"].as_str().unwrap_or("?").into(),
+                    )
+                })
+                .collect(),
+            plugins: nomes(&v["plugins"]),
+            skills: v["skills"].as_array().map_or(0, Vec::len),
+            comandos: v["slash_commands"].as_array().map_or(0, Vec::len),
+            agentes: nomes(&v["agents"]),
+        })],
+        Some("assistant") => {
+            let u = &v["message"]["usage"];
+            let contexto = [
+                "input_tokens",
+                "cache_read_input_tokens",
+                "cache_creation_input_tokens",
+            ]
             .iter()
-            .filter_map(|c| match c["type"].as_str() {
-                Some("text") => c["text"].as_str().filter(|t| !t.trim().is_empty()).map(|t| Sinal::Item(Item::Texto(iced::widget::markdown::parse(t.trim()).collect()))),
+            .filter_map(|k| u[*k].as_u64())
+            .sum::<u64>();
+            let itens = conteudo();
+            let sinais = itens.iter().filter_map(|c| match c["type"].as_str() {
+                Some("text") => c["text"]
+                    .as_str()
+                    .filter(|t| !t.trim().is_empty())
+                    .map(|t| {
+                        Sinal::Item(Item::Texto(
+                            iced::widget::markdown::parse(t.trim()).collect(),
+                        ))
+                    }),
                 Some("tool_use") => Some(Sinal::Item(Item::Ferramenta {
                     id: c["id"].as_str().unwrap_or_default().into(),
                     frase: frase(c["name"].as_str().unwrap_or("?"), &c["input"]),
                     erro: false,
                 })),
                 _ => None,
-            })
-            .collect(),
+            });
+            (contexto > 0)
+                .then_some(Sinal::Contexto(contexto))
+                .into_iter()
+                .chain(sinais)
+                .collect()
+        }
         Some("user") => conteudo()
             .iter()
             .filter(|c| c["type"] == "tool_result")
-            .map(|c| Sinal::Resultado { id: c["tool_use_id"].as_str().unwrap_or_default().into(), erro: c["is_error"] == true })
+            .map(|c| Sinal::Resultado {
+                id: c["tool_use_id"].as_str().unwrap_or_default().into(),
+                erro: c["is_error"] == true,
+            })
             .collect(),
         Some("control_request") if v["request"]["subtype"] == "can_use_tool" => {
             let r = &v["request"];
@@ -166,8 +268,23 @@ pub fn interpretar(v: &Value) -> Vec<Sinal> {
             vec![Sinal::Uso(uso("five_hour"), uso("seven_day"))]
         }
         Some("result") => {
-            let erro = (v["is_error"] == true).then(|| v["result"].as_str().unwrap_or("O turno terminou com erro.").to_string());
-            vec![Sinal::FimDoTurno(erro)]
+            let erro = (v["is_error"] == true).then(|| {
+                v["result"]
+                    .as_str()
+                    .unwrap_or("O turno terminou com erro.")
+                    .to_string()
+            });
+            let janela = v["modelUsage"]
+                .as_object()
+                .into_iter()
+                .flat_map(|m| m.values())
+                .filter_map(|m| m["contextWindow"].as_u64())
+                .max();
+            janela
+                .map(Sinal::JanelaContexto)
+                .into_iter()
+                .chain([Sinal::FimDoTurno(erro)])
+                .collect()
         }
         _ => Vec::new(),
     }
@@ -198,14 +315,28 @@ const LINHAS_PREVIA: usize = 14;
 
 /// O que vai mudar, para a pessoa decidir: diff do Edit, começo do Write, comando do Bash.
 fn previa(nome: &str, input: &Value) -> Vec<(char, String)> {
-    let linhas = |sinal: char, t: &str| t.lines().map(move |l| (sinal, l.to_string())).collect::<Vec<_>>();
+    let linhas = |sinal: char, t: &str| {
+        t.lines()
+            .map(move |l| (sinal, l.to_string()))
+            .collect::<Vec<_>>()
+    };
     let mut v = match nome {
-        "Edit" => [linhas('-', input["old_string"].as_str().unwrap_or_default()), linhas('+', input["new_string"].as_str().unwrap_or_default())].concat(),
+        "Edit" => [
+            linhas('-', input["old_string"].as_str().unwrap_or_default()),
+            linhas('+', input["new_string"].as_str().unwrap_or_default()),
+        ]
+        .concat(),
         "MultiEdit" => input["edits"]
             .as_array()
             .into_iter()
             .flatten()
-            .flat_map(|e| [linhas('-', e["old_string"].as_str().unwrap_or_default()), linhas('+', e["new_string"].as_str().unwrap_or_default())].concat())
+            .flat_map(|e| {
+                [
+                    linhas('-', e["old_string"].as_str().unwrap_or_default()),
+                    linhas('+', e["new_string"].as_str().unwrap_or_default()),
+                ]
+                .concat()
+            })
             .collect(),
         "Write" => linhas('+', input["content"].as_str().unwrap_or_default()),
         "Bash" => linhas('$', input["command"].as_str().unwrap_or_default()),
@@ -221,14 +352,30 @@ fn previa(nome: &str, input: &Value) -> Vec<(char, String)> {
 
 /// Conversa de exemplo para o modo de captura (fotos da tela sem gastar a conta).
 pub fn exemplo() -> Vec<Item> {
-    let ferramenta = |id: &str, nome, input: Value| Item::Ferramenta { id: id.into(), frase: frase(nome, &input), erro: false };
+    let ferramenta = |id: &str, nome, input: Value| Item::Ferramenta {
+        id: id.into(),
+        frase: frase(nome, &input),
+        erro: false,
+    };
     let edicao = json!({"file_path": "src/arvore.rs", "old_string": "const IGNORADAS: [&str; 4] = [\".git\", \"target\", \"node_modules\", \".~lock\"];", "new_string": "const IGNORADAS: [&str; 5] = [\".git\", \"target\", \"node_modules\", \".~lock\", \"dist\"];"});
     vec![
         Item::Eu("Esconde a pasta dist da árvore também".into()),
         ferramenta("1", "Read", json!({"file_path": "src/arvore.rs"})),
         ferramenta("2", "Grep", json!({"pattern": "IGNORADAS"})),
-        Item::Texto(iced::widget::markdown::parse("A lista fica em `IGNORADAS`, no começo de `arvore.rs`. Acrescentei `\"dist\"`.").collect()),
-        Item::Pedido { request_id: "x".into(), frase: frase("Edit", &edicao), previa: previa("Edit", &edicao), input: edicao, sugestoes: Value::Null, resposta: Resposta::Pendente },
+        Item::Texto(
+            iced::widget::markdown::parse(
+                "A lista fica em `IGNORADAS`, no começo de `arvore.rs`. Acrescentei `\"dist\"`.",
+            )
+            .collect(),
+        ),
+        Item::Pedido {
+            request_id: "x".into(),
+            frase: frase("Edit", &edicao),
+            previa: previa("Edit", &edicao),
+            input: edicao,
+            sugestoes: Value::Null,
+            resposta: Resposta::Pendente,
+        },
     ]
 }
 
@@ -240,18 +387,32 @@ mod testes {
     #[test]
     fn interpreta_o_pedido_de_permissao_e_o_uso() {
         let pedido: Value = serde_json::from_str(r#"{"type":"control_request","request_id":"a8a3","request":{"subtype":"can_use_tool","tool_name":"Write","input":{"file_path":"/tmp/x/ola.txt","content":"oi"},"permission_suggestions":[{"type":"setMode","mode":"acceptEdits","destination":"session"}],"tool_use_id":"toolu_01"}}"#).unwrap();
-        let Some(Sinal::Item(Item::Pedido { request_id, frase, previa, .. })) = interpretar(&pedido).pop() else { panic!("sem pedido") };
-        assert_eq!((request_id.as_str(), frase.as_str()), ("a8a3", "Gravar ola.txt"));
+        let Some(Sinal::Item(Item::Pedido {
+            request_id,
+            frase,
+            previa,
+            ..
+        })) = interpretar(&pedido).pop()
+        else {
+            panic!("sem pedido")
+        };
+        assert_eq!(
+            (request_id.as_str(), frase.as_str()),
+            ("a8a3", "Gravar ola.txt")
+        );
         assert_eq!(previa, vec![('+', "oi".to_string())]);
 
         let uso: Value = serde_json::from_str(r#"{"type":"rate_limit_event","rate_limit_info":{"unifiedWindows":{"five_hour":{"utilization":0.43},"seven_day":{"utilization":0.63}}}}"#).unwrap();
-        assert!(matches!(interpretar(&uso)[..], [Sinal::Uso(Some(a), Some(b))] if a == 0.43 && b == 0.63));
+        assert!(
+            matches!(interpretar(&uso)[..], [Sinal::Uso(Some(a), Some(b))] if a == 0.43 && b == 0.63)
+        );
     }
 
     #[test]
     fn resposta_de_permissao_no_formato_do_sdk() {
         let input = json!({"file_path": "a.rs"});
-        let sugestoes = json!([{"type": "setMode", "mode": "acceptEdits", "destination": "session"}]);
+        let sugestoes =
+            json!([{"type": "setMode", "mode": "acceptEdits", "destination": "session"}]);
         let v: Value = serde_json::from_str(&permitir("r1", &input, Some(&sugestoes))).unwrap();
         assert_eq!(v["response"]["request_id"], "r1");
         assert_eq!(v["response"]["response"]["behavior"], "allow");

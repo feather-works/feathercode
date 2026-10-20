@@ -1,22 +1,38 @@
 //! FeatherCode: editor de código da suíte FeatherWorks, com o Claude Code no painel lateral.
 mod agente;
 mod arvore;
+mod config;
+mod inicio;
+mod modelos;
 
 use agente::{Item, Resposta, Sinal};
 use feather_ui::cromo;
 use feather_ui::icones::icone_traco;
 use feather_ui::marca::{self, Produto};
-use feather_ui::tema::{self, COR_AZUL_ACENTO, COR_AZUL_FUNDO, COR_BORDA, COR_BORDA_SUAVE, COR_CROMO, COR_CROMO_2, COR_ERRO, COR_HOVER, COR_PAINEL, COR_PAINEL_FAIXA, COR_TEXTO, COR_TEXTO_MUTED};
+use feather_ui::tema::{
+    self, COR_AZUL_ACENTO, COR_AZUL_FUNDO, COR_BORDA, COR_BORDA_SUAVE, COR_CROMO, COR_CROMO_2,
+    COR_ERRO, COR_HOVER, COR_PAINEL, COR_PAINEL_FAIXA, COR_TEXTO, COR_TEXTO_MUTED,
+};
 use iced::widget::text::{LineHeight, Wrapping};
-use iced::widget::{button, column, markdown, stack, container, horizontal_space, pick_list, progress_bar, row, scrollable, text, text_editor, text_input, Column, Space};
-use iced::{font, highlighter, keyboard, window, Alignment, Background, Border, Color, Element, Font, Length, Size, Subscription, Task};
+use iced::widget::{
+    button, column, container, horizontal_space, markdown, pick_list, progress_bar, row,
+    scrollable, stack, text, text_editor, text_input, tooltip, Column, Space,
+};
+use iced::{
+    font, highlighter, keyboard, window, Alignment, Background, Border, Color, Element, Font,
+    Length, Size, Subscription, Task,
+};
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc::UnboundedSender;
 
-const NEGRITO: Font = Font { weight: font::Weight::Semibold, ..Font::DEFAULT };
+const NEGRITO: Font = Font {
+    weight: font::Weight::Semibold,
+    ..Font::DEFAULT
+};
 const MONO: Font = Font::MONOSPACE;
 /// Índice de "Roxo" em `tema::ACENTOS`: a cor do FeatherCode.
 const ROXO: usize = 5;
+const AMARELO: Color = Color::from_rgb(0.9, 0.7, 0.25);
 const VERDE: Color = Color::from_rgb(0.42, 0.75, 0.5);
 const LARGURA_ARVORE: f32 = 240.0;
 const LARGURA_AGENTE: f32 = 380.0;
@@ -31,8 +47,8 @@ const MARGEM_V: f32 = 8.0;
 const MARGEM_H: f32 = 12.0;
 
 fn main() -> iced::Result {
-    // Editor de código nasce escuro, como no artifact aprovado.
-    tema::definir_tema(true, ROXO);
+    let config = config::Config::ler();
+    tema::definir_tema(config.escuro, ROXO);
     // Pena da suíte na cor de destaque do FeatherCode.
     marca::definir_marca(Produto::FeatherSheet, true);
     #[allow(unused_mut)]
@@ -51,7 +67,7 @@ fn main() -> iced::Result {
         .theme(|_| tema::tema_iced())
         .window(janela)
         .subscription(Code::subscription)
-        .run_with(Code::novo)
+        .run_with(move || Code::novo(config))
 }
 
 struct Aba {
@@ -63,7 +79,14 @@ struct Aba {
 }
 
 fn maior_linha(t: &str) -> usize {
-    t.lines().map(|l| l.chars().map(|c| if c == '\t' { 4 } else { 1 }).sum::<usize>()).max().unwrap_or(0)
+    t.lines()
+        .map(|l| {
+            l.chars()
+                .map(|c| if c == '\t' { 4 } else { 1 })
+                .sum::<usize>()
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -118,6 +141,16 @@ enum Msg {
     Janela(Option<window::Id>),
     Tamanho(Size),
     Capturar,
+    Detalhes,
+    Inicio,
+    AbrirRecente(PathBuf),
+    AbrirArquivoRecente(PathBuf),
+    Tema(bool),
+    EscolherModelo(usize),
+    NomeProjeto(String),
+    EscolherOnde,
+    OndeEscolhido(Option<PathBuf>),
+    CriarProjeto,
     Link(markdown::Url),
     Capturado(window::Screenshot),
     Arrastar,
@@ -127,6 +160,12 @@ enum Msg {
 }
 
 struct Code {
+    /// Página inicial à mostra (nenhuma pasta aberta ainda, ou a pessoa voltou para ela).
+    inicio: bool,
+    config: config::Config,
+    modelo: Option<usize>,
+    nome_projeto: String,
+    erro_projeto: String,
     arvore: arvore::Arvore,
     abas: Vec<Aba>,
     ativa: usize,
@@ -141,7 +180,10 @@ struct Code {
     pedido: String,
     modo: Modo,
     uso: (Option<f32>, Option<f32>),
-    modelo: String,
+    info: agente::Info,
+    /// Tokens no contexto e tamanho da janela do modelo.
+    contexto: (u64, u64),
+    detalhes: bool,
     proximo_controle: u64,
     comando: String,
     saida: String,
@@ -154,10 +196,25 @@ struct Code {
 }
 
 impl Code {
-    fn novo() -> (Self, Task<Msg>) {
-        let pasta = std::env::args_os().nth(1).map(PathBuf::from).or_else(|| std::env::current_dir().ok()).unwrap_or_else(|| ".".into());
-        let pasta = pasta.canonicalize().unwrap_or(pasta);
+    fn novo(mut config: config::Config) -> (Self, Task<Msg>) {
+        // Sem pasta na linha de comando, abre na página inicial.
+        let pedida = std::env::args_os()
+            .nth(1)
+            .map(PathBuf::from)
+            .map(|p| p.canonicalize().unwrap_or(p));
+        if let Some(p) = &pedida {
+            config.usar_pasta(p.clone());
+        }
+        let inicio = pedida.is_none();
+        let pasta = pedida
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| ".".into());
         let code = Code {
+            inicio,
+            config,
+            modelo: None,
+            nome_projeto: String::new(),
+            erro_projeto: String::new(),
             arvore: arvore::Arvore::nova(pasta.clone()),
             abas: Vec::new(),
             ativa: 0,
@@ -170,7 +227,9 @@ impl Code {
             pedido: String::new(),
             modo: Modo::Perguntar,
             uso: (None, None),
-            modelo: String::new(),
+            info: agente::Info::default(),
+            contexto: (0, 0),
+            detalhes: false,
             proximo_controle: 0,
             comando: String::new(),
             saida: String::new(),
@@ -200,10 +259,15 @@ impl Code {
             keyboard::Key::Character("o") if m.command() => Some(Msg::AbrirPasta),
             _ => None,
         });
-        let mut subs = vec![teclas, window::resize_events().map(|(_, s)| Msg::Tamanho(s))];
+        let mut subs = vec![
+            teclas,
+            window::resize_events().map(|(_, s)| Msg::Tamanho(s)),
+        ];
         if self.ligado {
             let conversa = agente::conversa(self.arvore.raiz.clone(), self.modo.id());
-            subs.push(Subscription::run_with_id(("agente", self.conversa), conversa).map(Msg::Agente));
+            subs.push(
+                Subscription::run_with_id(("agente", self.conversa), conversa).map(Msg::Agente),
+            );
         }
         Subscription::batch(subs)
     }
@@ -231,9 +295,15 @@ impl Code {
 
     /// O que o claude precisa saber do editor junto com o pedido: arquivo, linha e seleção.
     fn contexto(&self) -> String {
-        let Some(aba) = self.aba() else { return String::new() };
+        let Some(aba) = self.aba() else {
+            return String::new();
+        };
         let (linha, _) = aba.conteudo.cursor_position();
-        let mut s = format!("\n\n<contexto_do_editor>\nArquivo aberto no FeatherCode: {} (cursor na linha {})", self.relativo(&aba.caminho).display(), linha + 1);
+        let mut s = format!(
+            "\n\n<contexto_do_editor>\nArquivo aberto no FeatherCode: {} (cursor na linha {})",
+            self.relativo(&aba.caminho).display(),
+            linha + 1
+        );
         if let Some(sel) = aba.conteudo.selection().filter(|s| !s.trim().is_empty()) {
             // shortcut: seleção cortada em 20 mil caracteres; mandar como anexo se fizer falta.
             let sel: String = sel.chars().take(20_000).collect();
@@ -271,7 +341,9 @@ impl Code {
                 self.recarregar_abas();
             }
             Sinal::Uso(cinco, sete) => self.uso = (cinco.or(self.uso.0), sete.or(self.uso.1)),
-            Sinal::Modelo(m) => self.modelo = m,
+            Sinal::Inicio(i) => self.info = i,
+            Sinal::Contexto(n) => self.contexto.0 = n,
+            Sinal::JanelaContexto(n) => self.contexto.1 = n,
             Sinal::FimDoTurno(erro) => {
                 self.ocupado = false;
                 self.itens.extend(erro.map(Item::Aviso));
@@ -282,21 +354,101 @@ impl Code {
         }
     }
 
+    fn abrir_pasta(&mut self, p: PathBuf) -> Task<Msg> {
+        if self.abas.iter().any(|a| a.sujo) {
+            self.aviso = "Salve ou feche as abas com mudanças antes de trocar de pasta.".into();
+            return Task::none();
+        }
+        if !p.is_dir() {
+            self.aviso = format!("A pasta {} não existe mais.", p.display());
+            self.config.pastas.retain(|x| *x != p);
+            self.config.gravar();
+            return Task::none();
+        }
+        self.config.usar_pasta(p.clone());
+        self.ramo = ramo(&p);
+        self.arvore = arvore::Arvore::nova(p);
+        self.abas.clear();
+        self.ativa = 0;
+        self.inicio = false;
+        self.aviso.clear();
+        self.update(Msg::NovaConversa)
+    }
+
     fn update(&mut self, msg: Msg) -> Task<Msg> {
         match msg {
             Msg::AbrirPasta => {
-                return Task::perform(rfd::AsyncFileDialog::new().set_title("Abrir pasta").pick_folder(), |h| Msg::PastaEscolhida(h.map(|h| h.path().to_path_buf())));
+                return Task::perform(
+                    rfd::AsyncFileDialog::new()
+                        .set_title("Abrir pasta")
+                        .pick_folder(),
+                    |h| Msg::PastaEscolhida(h.map(|h| h.path().to_path_buf())),
+                );
             }
-            Msg::PastaEscolhida(Some(p)) => {
-                if self.abas.iter().any(|a| a.sujo) {
-                    self.aviso = "Salve ou feche as abas com mudanças antes de trocar de pasta.".into();
+            Msg::PastaEscolhida(Some(p)) | Msg::AbrirRecente(p) => return self.abrir_pasta(p),
+            Msg::AbrirArquivoRecente(p) => {
+                let Some(pai) = p.parent().map(Path::to_path_buf) else {
                     return Task::none();
+                };
+                if self.arvore.raiz != pai || self.inicio {
+                    let _ = self.abrir_pasta(pai);
                 }
-                self.ramo = ramo(&p);
-                self.arvore = arvore::Arvore::nova(p);
-                self.abas.clear();
-                self.ativa = 0;
-                return self.update(Msg::NovaConversa);
+                return self.update(Msg::AbrirArquivo(p));
+            }
+            Msg::Inicio => {
+                if self.abas.iter().any(|a| a.sujo) {
+                    self.aviso =
+                        "Salve ou feche as abas com mudanças antes de voltar ao início.".into();
+                } else {
+                    self.inicio = true;
+                }
+            }
+            Msg::Tema(escuro) => {
+                tema::definir_tema(escuro, ROXO);
+                self.config.escuro = escuro;
+                self.config.gravar();
+            }
+            Msg::EscolherModelo(i) => {
+                self.modelo = Some(i);
+                self.erro_projeto.clear();
+            }
+            Msg::NomeProjeto(n) => {
+                self.nome_projeto = n;
+                self.erro_projeto.clear();
+            }
+            Msg::EscolherOnde => {
+                let inicio = self.onde_criar();
+                return Task::perform(
+                    rfd::AsyncFileDialog::new()
+                        .set_title("Onde criar o projeto")
+                        .set_directory(inicio)
+                        .pick_folder(),
+                    |h| Msg::OndeEscolhido(h.map(|h| h.path().to_path_buf())),
+                );
+            }
+            Msg::OndeEscolhido(Some(p)) => {
+                self.config.pasta_projetos = Some(p);
+                self.config.gravar();
+            }
+            Msg::OndeEscolhido(None) => {}
+            Msg::CriarProjeto => {
+                let Some(m) = self.modelo.and_then(|i| modelos::MODELOS.get(i)) else {
+                    return Task::none();
+                };
+                match modelos::criar(m, &self.nome_projeto, &self.onde_criar()) {
+                    Ok(raiz) => {
+                        self.nome_projeto.clear();
+                        self.modelo = None;
+                        let abrir = self.abrir_pasta(raiz.clone());
+                        let leia = raiz.join("README.md");
+                        return if leia.is_file() {
+                            Task::batch([abrir, Task::done(Msg::AbrirArquivo(leia))])
+                        } else {
+                            abrir
+                        };
+                    }
+                    Err(e) => self.erro_projeto = e,
+                }
             }
             Msg::PastaEscolhida(None) => {}
             Msg::Alternar(p) => self.arvore.alternar(&p),
@@ -306,11 +458,22 @@ impl Code {
                 } else {
                     match std::fs::read_to_string(&p) {
                         Ok(t) => {
-                            self.abas.push(Aba { caminho: p, maior: maior_linha(&t), conteudo: text_editor::Content::with_text(&t), sujo: false });
+                            self.config.usar_arquivo(p.clone());
+                            self.abas.push(Aba {
+                                caminho: p,
+                                maior: maior_linha(&t),
+                                conteudo: text_editor::Content::with_text(&t),
+                                sujo: false,
+                            });
                             self.ativa = self.abas.len() - 1;
                             self.aviso.clear();
                         }
-                        Err(e) => self.aviso = format!("Não deu para abrir {} como texto: {e}", self.relativo(&p).display()),
+                        Err(e) => {
+                            self.aviso = format!(
+                                "Não deu para abrir {} como texto: {e}",
+                                self.relativo(&p).display()
+                            )
+                        }
                     }
                 }
             }
@@ -362,11 +525,15 @@ impl Code {
                 self.fila.clear();
                 self.itens.clear();
                 self.ocupado = false;
+                self.contexto = (0, 0);
             }
+            Msg::Detalhes => self.detalhes = !self.detalhes,
             Msg::Modo(m) => {
                 self.modo = m;
                 if self.canal.is_some() {
-                    self.controle(serde_json::json!({"subtype": "set_permission_mode", "mode": m.id()}));
+                    self.controle(
+                        serde_json::json!({"subtype": "set_permission_mode", "mode": m.id()}),
+                    );
                 }
             }
             Msg::Agente(agente::Evento::Pronto(canal)) => {
@@ -388,7 +555,16 @@ impl Code {
                 self.conversa += 1;
             }
             Msg::Responder(i, r) => {
-                let Some(Item::Pedido { request_id, input, sugestoes, resposta, .. }) = self.itens.get_mut(i) else { return Task::none() };
+                let Some(Item::Pedido {
+                    request_id,
+                    input,
+                    sugestoes,
+                    resposta,
+                    ..
+                }) = self.itens.get_mut(i)
+                else {
+                    return Task::none();
+                };
                 if *resposta != Resposta::Pendente {
                     return Task::none();
                 }
@@ -427,24 +603,41 @@ impl Code {
             Msg::Janela(id) => {
                 self.janela = id;
                 if std::env::var_os("FEATHERCODE_CAPTURAR").is_some() {
-                    return Task::perform(tokio::time::sleep(std::time::Duration::from_millis(900)), |_| Msg::Capturar);
+                    return Task::perform(
+                        tokio::time::sleep(std::time::Duration::from_millis(900)),
+                        |_| Msg::Capturar,
+                    );
                 }
             }
             Msg::Link(url) => {
                 #[cfg(target_os = "linux")]
-                let abrir = std::process::Command::new("xdg-open").arg(url.as_str()).spawn();
+                let abrir = std::process::Command::new("xdg-open")
+                    .arg(url.as_str())
+                    .spawn();
                 #[cfg(target_os = "windows")]
-                let abrir = std::process::Command::new("cmd").args(["/C", "start", "", url.as_str()]).spawn();
+                let abrir = std::process::Command::new("cmd")
+                    .args(["/C", "start", "", url.as_str()])
+                    .spawn();
                 #[cfg(target_os = "macos")]
                 let abrir = std::process::Command::new("open").arg(url.as_str()).spawn();
                 if let Err(e) = abrir {
                     self.aviso = format!("Não deu para abrir o link: {e}");
                 }
             }
-            Msg::Capturar => return self.janela.map_or_else(Task::none, |id| window::screenshot(id).map(Msg::Capturado)),
+            Msg::Capturar => {
+                return self
+                    .janela
+                    .map_or_else(Task::none, |id| window::screenshot(id).map(Msg::Capturado))
+            }
             Msg::Capturado(foto) => {
                 if let Some(caminho) = std::env::var_os("FEATHERCODE_CAPTURAR") {
-                    if let Err(e) = image::save_buffer(&caminho, &foto.bytes, foto.size.width, foto.size.height, image::ColorType::Rgba8) {
+                    if let Err(e) = image::save_buffer(
+                        &caminho,
+                        &foto.bytes,
+                        foto.size.width,
+                        foto.size.height,
+                        image::ColorType::Rgba8,
+                    ) {
                         eprintln!("[captura] {e}");
                     }
                 }
@@ -452,10 +645,19 @@ impl Code {
             }
             Msg::Tamanho(s) => self.tamanho = s,
             Msg::Arrastar => {
-                let Some(id) = self.janela else { return Task::none() };
-                return feather_ui::janelas::arrastar_ou_maximizar(id, &mut self.ultimo_clique_barra);
+                let Some(id) = self.janela else {
+                    return Task::none();
+                };
+                return feather_ui::janelas::arrastar_ou_maximizar(
+                    id,
+                    &mut self.ultimo_clique_barra,
+                );
             }
-            Msg::Minimizar => return self.janela.map_or_else(Task::none, |id| window::minimize(id, true)),
+            Msg::Minimizar => {
+                return self
+                    .janela
+                    .map_or_else(Task::none, |id| window::minimize(id, true))
+            }
             Msg::Maximizar => return self.janela.map_or_else(Task::none, window::toggle_maximize),
             Msg::Fechar => return self.janela.map_or_else(Task::none, window::close),
         }
@@ -463,14 +665,33 @@ impl Code {
     }
 
     fn view(&self) -> Element<'_, Msg> {
-        let pasta = self.arvore.raiz.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        // Na página inicial não há pasta aberta: nada de nome nem botão "Início".
+        let pasta = if self.inicio {
+            String::new()
+        } else {
+            self.arvore.raiz.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+        };
+        let voltar: Element<Msg> = if self.inicio {
+            Space::with_width(0).into()
+        } else {
+            botao_texto(row![icone_traco("layout-grid", 14.0), text("Início").size(12)].spacing(6).align_y(Alignment::Center), Msg::Inicio)
+        };
         let nome = container(
             row![
                 cromo::emblema(),
                 text("FeatherCode").size(13).font(NEGRITO),
                 text(pasta).size(13).color(COR_TEXTO_MUTED()),
                 horizontal_space(),
-                botao_texto(row![icone_traco("folder-open", 14.0), text("Abrir pasta").size(12)].spacing(6).align_y(Alignment::Center), Msg::AbrirPasta),
+                voltar,
+                botao_texto(
+                    row![
+                        icone_traco("folder-open", 14.0),
+                        text("Abrir pasta").size(12)
+                    ]
+                    .spacing(6)
+                    .align_y(Alignment::Center),
+                    Msg::AbrirPasta
+                ),
             ]
             .spacing(10)
             .align_y(Alignment::Center),
@@ -480,12 +701,37 @@ impl Code {
         .height(cromo::BARRA_ALTURA)
         .align_y(Alignment::Center)
         .style(tema::estilo_container_topo);
-        let barra = cromo::barra_integrada(nome.into(), cromo::AcoesJanela { arrastar: Msg::Arrastar, minimizar: Msg::Minimizar, maximizar: Msg::Maximizar, fechar: Msg::Fechar });
+        let barra = cromo::barra_integrada(
+            nome.into(),
+            cromo::AcoesJanela {
+                arrastar: Msg::Arrastar,
+                minimizar: Msg::Minimizar,
+                maximizar: Msg::Maximizar,
+                fechar: Msg::Fechar,
+            },
+        );
 
+        if self.inicio {
+            return cromo::moldura_janela(
+                column![
+                    barra,
+                    self.inicio_view(),
+                    linha_horizontal(),
+                    self.status_view()
+                ]
+                .into(),
+            );
+        }
         let meio = row![
             self.arvore_view(),
             linha_vertical(),
-            column![self.abas_view(), self.editor_view(), linha_horizontal(), self.terminal_view()].width(Length::Fill),
+            column![
+                self.abas_view(),
+                self.editor_view(),
+                linha_horizontal(),
+                self.terminal_view()
+            ]
+            .width(Length::Fill),
             linha_vertical(),
             self.agente_view(),
         ]
@@ -496,52 +742,133 @@ impl Code {
     fn arvore_view(&self) -> Element<'_, Msg> {
         let aberto = self.aba().map(|a| a.caminho.as_path());
         let linhas = self.arvore.linhas().into_iter().map(|l| {
-            let nome = l.caminho.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            let seta: Element<Msg> = if l.pasta { icone_traco(if l.aberta { "chevron-down" } else { "chevron-right" }, 12.0).into() } else { Space::with_width(12).into() };
-            let ativo = aberto == Some(l.caminho.as_path());
-            let msg = if l.pasta { Msg::Alternar(l.caminho) } else { Msg::AbrirArquivo(l.caminho) };
-            button(row![Space::with_width(l.nivel as f32 * 14.0), seta, text(nome).size(13)].spacing(4).align_y(Alignment::Center))
-                .on_press(msg)
-                .width(Length::Fill)
-                .padding([3, 12])
-                .style(move |_, s| item_lista(ativo, s, 0.0))
+            let nome = l
+                .caminho
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let seta: Element<Msg> = if l.pasta {
+                icone_traco(
+                    if l.aberta {
+                        "chevron-down"
+                    } else {
+                        "chevron-right"
+                    },
+                    12.0,
+                )
                 .into()
-        });
-        let titulo = text(self.arvore.raiz.file_name().map(|n| n.to_string_lossy().to_uppercase()).unwrap_or_default()).size(11).font(NEGRITO).color(COR_TEXTO_MUTED());
-        container(column![container(titulo).padding([10, 12]), tema::rolagem(Column::with_children(linhas)).height(Length::Fill).style(rolagem_discreta)])
-            .width(LARGURA_ARVORE)
-            .height(Length::Fill)
-            .style(|_| fundo(COR_PAINEL_FAIXA()))
+            } else {
+                Space::with_width(12).into()
+            };
+            let ativo = aberto == Some(l.caminho.as_path());
+            let msg = if l.pasta {
+                Msg::Alternar(l.caminho)
+            } else {
+                Msg::AbrirArquivo(l.caminho)
+            };
+            button(
+                row![
+                    Space::with_width(l.nivel as f32 * 14.0),
+                    seta,
+                    text(nome).size(13)
+                ]
+                .spacing(4)
+                .align_y(Alignment::Center),
+            )
+            .on_press(msg)
+            .width(Length::Fill)
+            .padding([3, 12])
+            .style(move |_, s| item_lista(ativo, s, 0.0))
             .into()
+        });
+        let titulo = text(
+            self.arvore
+                .raiz
+                .file_name()
+                .map(|n| n.to_string_lossy().to_uppercase())
+                .unwrap_or_default(),
+        )
+        .size(11)
+        .font(NEGRITO)
+        .color(COR_TEXTO_MUTED());
+        container(column![
+            container(titulo).padding([10, 12]),
+            tema::rolagem(Column::with_children(linhas))
+                .height(Length::Fill)
+                .style(rolagem_discreta)
+        ])
+        .width(LARGURA_ARVORE)
+        .height(Length::Fill)
+        .style(|_| fundo(COR_PAINEL_FAIXA()))
+        .into()
     }
 
     fn abas_view(&self) -> Element<'_, Msg> {
         let abas = self.abas.iter().enumerate().map(|(i, a)| {
             let ativa = i == self.ativa;
-            let nome = a.caminho.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            let fechar = button(text(if a.sujo { "●" } else { "×" }).size(13).color(COR_TEXTO_MUTED())).on_press(Msg::FecharAba(i)).padding([0, 4]).style(|_, s| item_lista(false, s, 3.0));
-            let aba = button(row![text(nome).size(13), fechar].spacing(8).align_y(Alignment::Center))
-                .on_press(Msg::TrocarAba(i))
-                .padding(iced::Padding { top: 6.0, right: 8.0, bottom: 6.0, left: 14.0 })
-                .height(Length::Fill)
-                .style(move |_, s| aba_estilo(ativa, s));
+            let nome = a
+                .caminho
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let fechar = button(
+                text(if a.sujo { "●" } else { "×" })
+                    .size(13)
+                    .color(COR_TEXTO_MUTED()),
+            )
+            .on_press(Msg::FecharAba(i))
+            .padding([0, 4])
+            .style(|_, s| item_lista(false, s, 3.0));
+            let aba = button(
+                row![text(nome).size(13), fechar]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+            )
+            .on_press(Msg::TrocarAba(i))
+            .padding(iced::Padding {
+                top: 6.0,
+                right: 8.0,
+                bottom: 6.0,
+                left: 14.0,
+            })
+            .height(Length::Fill)
+            .style(move |_, s| aba_estilo(ativa, s));
             // O traço de cima marca a aba ativa, como no artifact aprovado.
-            let traco = container(Space::with_height(2)).width(Length::Fill).style(move |_| fundo(if ativa { COR_AZUL_ACENTO() } else { Color::TRANSPARENT }));
+            let traco = container(Space::with_height(2))
+                .width(Length::Fill)
+                .style(move |_| {
+                    fundo(if ativa {
+                        COR_AZUL_ACENTO()
+                    } else {
+                        Color::TRANSPARENT
+                    })
+                });
             row![stack![aba, traco], linha_vertical()].into()
         });
-        container(row(abas)).width(Length::Fill).height(ALTURA_ABAS).style(|_| fundo(COR_CROMO_2())).into()
+        container(row(abas))
+            .width(Length::Fill)
+            .height(ALTURA_ABAS)
+            .style(|_| fundo(COR_CROMO_2()))
+            .into()
     }
 
     fn editor_view(&self) -> Element<'_, Msg> {
         let Some(aba) = self.aba() else {
             let vazio = column![
                 text("Nenhum arquivo aberto").size(15).font(NEGRITO),
-                text("Escolha um arquivo na árvore, ou peça ao Claude Code no painel da direita.").size(13).color(COR_TEXTO_MUTED()),
-                text("Ctrl+O abre outra pasta  ·  Ctrl+S salva").size(12).color(COR_TEXTO_MUTED()),
+                text("Escolha um arquivo na árvore, ou peça ao Claude Code no painel da direita.")
+                    .size(13)
+                    .color(COR_TEXTO_MUTED()),
+                text("Ctrl+O abre outra pasta  ·  Ctrl+S salva")
+                    .size(12)
+                    .color(COR_TEXTO_MUTED()),
             ]
             .spacing(8)
             .align_x(Alignment::Center);
-            return container(vazio).center(Length::Fill).style(|_| fundo(COR_PAINEL())).into();
+            return container(vazio)
+                .center(Length::Fill)
+                .style(|_| fundo(COR_PAINEL()))
+                .into();
         };
         // Mesmo desenho do editor de macros do FeatherSheet: o text_editor do Iced 0.13 não expõe a
         // rolagem, então ele ganha a altura do texto e um scrollable nosso rola a calha e o código juntos.
@@ -549,11 +876,24 @@ impl Code {
         let (linha_cursor, _) = aba.conteudo.cursor_position();
         let calha_px = total.to_string().len().max(2) as f32 * LARGURA_CARACTERE + 28.0;
         let visivel_x = self.tamanho.width - LARGURA_ARVORE - LARGURA_AGENTE - calha_px - 4.0;
-        let visivel_y = self.tamanho.height - cromo::BARRA_ALTURA - ALTURA_ABAS - ALTURA_TERMINAL - ALTURA_STATUS - 4.0;
+        let visivel_y = self.tamanho.height
+            - cromo::BARRA_ALTURA
+            - ALTURA_ABAS
+            - ALTURA_TERMINAL
+            - ALTURA_STATUS
+            - 4.0;
         let largura = (aba.maior as f32 * LARGURA_CARACTERE + 2.0 * MARGEM_H + 32.0).max(visivel_x);
         let altura = (total as f32 * ALTURA_LINHA + 2.0 * MARGEM_V).max(visivel_y);
-        let extensao = aba.caminho.extension().and_then(|e| e.to_str()).unwrap_or("txt");
-        let cores = if tema::escuro() { highlighter::Theme::Base16Ocean } else { highlighter::Theme::InspiredGitHub };
+        let extensao = aba
+            .caminho
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("txt");
+        let cores = if tema::escuro() {
+            highlighter::Theme::Base16Ocean
+        } else {
+            highlighter::Theme::InspiredGitHub
+        };
         let editor = text_editor(&aba.conteudo)
             .on_action(Msg::Editar)
             .font(MONO)
@@ -562,7 +902,12 @@ impl Code {
             .wrapping(Wrapping::None)
             .width(largura)
             .height(altura)
-            .padding(iced::Padding { top: MARGEM_V, bottom: MARGEM_V, left: MARGEM_H, right: MARGEM_H })
+            .padding(iced::Padding {
+                top: MARGEM_V,
+                bottom: MARGEM_V,
+                left: MARGEM_H,
+                right: MARGEM_H,
+            })
             .highlight(extensao, cores)
             .style(|_, _| text_editor::Style {
                 background: Background::Color(COR_PAINEL()),
@@ -574,27 +919,57 @@ impl Code {
             });
         let horizontal = scrollable(editor)
             .style(rolagem_discreta)
-            .direction(scrollable::Direction::Horizontal(scrollable::Scrollbar::new().width(6).scroller_width(6)))
+            .direction(scrollable::Direction::Horizontal(
+                scrollable::Scrollbar::new().width(6).scroller_width(6),
+            ))
             .width(Length::Fill);
         let conteudo = row![calha(total, linha_cursor + 1, calha_px, altura), horizontal];
-        container(tema::rolagem(conteudo).height(Length::Fill).width(Length::Fill).style(rolagem_discreta)).style(|_| fundo(COR_PAINEL())).into()
+        container(
+            tema::rolagem(conteudo)
+                .height(Length::Fill)
+                .width(Length::Fill)
+                .style(rolagem_discreta),
+        )
+        .style(|_| fundo(COR_PAINEL()))
+        .into()
     }
 
     fn terminal_view(&self) -> Element<'_, Msg> {
-        let entrada = text_input(if self.rodando { "Rodando…" } else { "Comando na pasta, ex.: cargo build" }, &self.comando)
-            .on_input(Msg::Comando)
-            .on_submit(Msg::Rodar)
-            .font(MONO)
-            .size(12)
-            .padding(0)
-            .style(campo_sem_borda);
-        let saida = tema::rolagem(text(&self.saida).font(MONO).size(12)).style(rolagem_discreta).anchor_bottom().height(Length::Fill).width(Length::Fill);
-        container(column![
-            text("TERMINAL").size(11).font(NEGRITO).color(COR_TEXTO_MUTED()),
-            saida,
-            row![text("$").font(MONO).size(12).color(COR_AZUL_ACENTO()), entrada].spacing(8).align_y(Alignment::Center),
-        ]
-        .spacing(6))
+        let entrada = text_input(
+            if self.rodando {
+                "Rodando…"
+            } else {
+                "Comando na pasta, ex.: cargo build"
+            },
+            &self.comando,
+        )
+        .on_input(Msg::Comando)
+        .on_submit(Msg::Rodar)
+        .font(MONO)
+        .size(12)
+        .padding(0)
+        .style(campo_sem_borda);
+        let saida = tema::rolagem(text(&self.saida).font(MONO).size(12))
+            .style(rolagem_discreta)
+            .anchor_bottom()
+            .height(Length::Fill)
+            .width(Length::Fill);
+        container(
+            column![
+                text("TERMINAL")
+                    .size(11)
+                    .font(NEGRITO)
+                    .color(COR_TEXTO_MUTED()),
+                saida,
+                row![
+                    text("$").font(MONO).size(12).color(COR_AZUL_ACENTO()),
+                    entrada
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            ]
+            .spacing(6),
+        )
         .padding([8, 14])
         .width(Length::Fill)
         .height(ALTURA_TERMINAL)
@@ -606,24 +981,39 @@ impl Code {
         let titulo = self
             .itens
             .iter()
-            .find_map(|i| if let Item::Eu(t) = i { Some(t.chars().take(38).collect::<String>()) } else { None })
+            .find_map(|i| {
+                if let Item::Eu(t) = i {
+                    Some(t.chars().take(38).collect::<String>())
+                } else {
+                    None
+                }
+            })
             .unwrap_or_else(|| "Nova conversa".into());
         let topo = container(
             row![
                 text(titulo).size(13).font(NEGRITO),
                 horizontal_space(),
+                botao_icone("info-circle", Msg::Detalhes),
                 botao_icone("plus", Msg::NovaConversa),
             ]
+            .spacing(2)
             .align_y(Alignment::Center),
         )
-        .padding(iced::Padding { top: 0.0, right: 8.0, bottom: 0.0, left: 14.0 })
+        .padding(iced::Padding {
+            top: 0.0,
+            right: 8.0,
+            bottom: 0.0,
+            left: 14.0,
+        })
         .height(ALTURA_ABAS)
         .align_y(Alignment::Center)
         .style(|_| fundo(COR_CROMO_2()));
 
         let mut corpo = Column::new().spacing(12).padding([14, 14]);
-        if self.uso.0.is_some() || self.uso.1.is_some() {
-            corpo = corpo.push(column![barra_uso("Sessão (5 h)", self.uso.0), barra_uso("Semana (7 dias)", self.uso.1)].spacing(8));
+        if self.detalhes {
+            corpo = corpo.push(self.detalhes_view());
+        } else if self.uso.0.is_some() || self.uso.1.is_some() || self.contexto.0 > 0 {
+            corpo = corpo.push(self.barras_view());
         }
         if self.itens.is_empty() {
             corpo = corpo.push(
@@ -656,41 +1046,87 @@ impl Code {
         let chip: Element<Msg> = match self.aba() {
             Some(a) => {
                 let (l, _) = a.conteudo.cursor_position();
-                container(text(format!("{}:{}", self.relativo(&a.caminho).display(), l + 1)).font(MONO).size(11).color(COR_TEXTO_MUTED()))
-                    .padding([1, 6])
-                    .style(|_| container::Style { border: Border { color: COR_BORDA(), width: 1.0, radius: 4.0.into() }, ..Default::default() })
-                    .into()
+                container(
+                    text(format!("{}:{}", self.relativo(&a.caminho).display(), l + 1))
+                        .font(MONO)
+                        .size(11)
+                        .color(COR_TEXTO_MUTED()),
+                )
+                .padding([1, 6])
+                .style(|_| container::Style {
+                    border: Border {
+                        color: COR_BORDA(),
+                        width: 1.0,
+                        radius: 4.0.into(),
+                    },
+                    ..Default::default()
+                })
+                .into()
             }
             None => Space::with_height(0).into(),
         };
         let acao = if self.ocupado {
-            button(container(icone_traco("player-stop", 13.0)).center(22)).on_press(Msg::Parar).padding(0).style(|_, s| item_lista(false, s, 5.0))
+            button(container(icone_traco("player-stop", 13.0)).center(22))
+                .on_press(Msg::Parar)
+                .padding(0)
+                .style(|_, s| item_lista(false, s, 5.0))
         } else {
-            button(container(text("↑").size(14).color(COR_PAINEL())).center(22)).on_press(Msg::Enviar).padding(0).style(botao_enviar)
+            button(container(text("↑").size(14).color(COR_PAINEL())).center(22))
+                .on_press(Msg::Enviar)
+                .padding(0)
+                .style(botao_enviar)
         };
         let rodape = row![
+            self.bolinha(),
             text("Claude Code").size(12).color(COR_TEXTO_MUTED()),
-            pick_list(Modo::TODOS, Some(self.modo), Msg::Modo).text_size(12).padding([2, 4]).style(lista_sem_borda).menu_style(tema::estilo_menu_popup),
+            pick_list(Modo::TODOS, Some(self.modo), Msg::Modo)
+                .text_size(12)
+                .padding([2, 4])
+                .style(lista_sem_borda)
+                .menu_style(tema::estilo_menu_popup),
             horizontal_space(),
             acao,
         ]
         .spacing(8)
         .align_y(Alignment::Center);
-        let entrada = container(
-            column![
-                container(chip).padding(iced::Padding { top: 8.0, right: 10.0, bottom: 0.0, left: 10.0 }),
-                text_input("Peça uma mudança ou pergunte…", &self.pedido).on_input(Msg::Pedido).on_submit(Msg::Enviar).size(13).padding([6, 10]).style(campo_sem_borda),
-                linha_horizontal(),
-                container(rodape).padding([5, 8]),
-            ],
-        )
-        .style(|_| container::Style { border: Border { color: COR_BORDA(), width: 1.0, radius: 6.0.into() }, ..fundo(COR_PAINEL()) });
+        let entrada = container(column![
+            container(chip).padding(iced::Padding {
+                top: 8.0,
+                right: 10.0,
+                bottom: 0.0,
+                left: 10.0
+            }),
+            text_input("Peça uma mudança ou pergunte…", &self.pedido)
+                .on_input(Msg::Pedido)
+                .on_submit(Msg::Enviar)
+                .size(13)
+                .padding([6, 10])
+                .style(campo_sem_borda),
+            linha_horizontal(),
+            container(rodape).padding([5, 8]),
+        ])
+        .style(|_| container::Style {
+            border: Border {
+                color: COR_BORDA(),
+                width: 1.0,
+                radius: 6.0.into(),
+            },
+            ..fundo(COR_PAINEL())
+        });
 
         container(column![
             topo,
             linha_horizontal(),
-            tema::rolagem(corpo).style(rolagem_discreta).anchor_bottom().height(Length::Fill),
-            container(entrada).padding(iced::Padding { top: 0.0, right: 10.0, bottom: 10.0, left: 10.0 }),
+            tema::rolagem(corpo)
+                .style(rolagem_discreta)
+                .anchor_bottom()
+                .height(Length::Fill),
+            container(entrada).padding(iced::Padding {
+                top: 0.0,
+                right: 10.0,
+                bottom: 10.0,
+                left: 10.0
+            }),
         ])
         .width(LARGURA_AGENTE)
         .height(Length::Fill)
@@ -698,25 +1134,176 @@ impl Code {
         .into()
     }
 
+    /// Estado do agente na bolinha ao lado do nome, com a frase na dica.
+    fn estado(&self) -> (Color, &'static str) {
+        let esperando = self.itens.iter().any(|i| {
+            matches!(
+                i,
+                Item::Pedido {
+                    resposta: Resposta::Pendente,
+                    ..
+                }
+            )
+        });
+        match (self.ligado, self.ocupado) {
+            (false, _) if matches!(self.itens.last(), Some(Item::Aviso(_))) => {
+                (COR_ERRO(), "Parou com erro")
+            }
+            (false, _) => (COR_TEXTO_MUTED(), "Desligado: abre na primeira mensagem"),
+            (true, _) if esperando => (AMARELO, "Esperando a sua permissão"),
+            (true, true) => (COR_AZUL_ACENTO(), "Trabalhando"),
+            (true, false) => (VERDE, "Pronto"),
+        }
+    }
+
+    fn bolinha(&self) -> Element<'_, Msg> {
+        let (cor, frase) = self.estado();
+        tooltip(
+            text("●").size(10).color(cor),
+            container(text(frase).size(11))
+                .padding([3, 8])
+                .style(tema::estilo_dica),
+            tooltip::Position::Top,
+        )
+        .into()
+    }
+
+    fn barras_view(&self) -> Element<'_, Msg> {
+        let mut c = Column::new().spacing(8);
+        let (usados, janela) = self.contexto;
+        if usados > 0 {
+            let fracao = if janela > 0 {
+                usados as f32 / janela as f32
+            } else {
+                0.0
+            };
+            let valor = if janela > 0 {
+                format!("{} de {}", tokens(usados), tokens(janela))
+            } else {
+                tokens(usados)
+            };
+            c = c.push(barra("Contexto", fracao, valor));
+        }
+        if let Some(u) = self.uso.0 {
+            c = c.push(barra("Sessão (5 h)", u, format!("{:.0}%", u * 100.0)));
+        }
+        if let Some(u) = self.uso.1 {
+            c = c.push(barra("Semana (7 dias)", u, format!("{:.0}%", u * 100.0)));
+        }
+        c.into()
+    }
+
+    fn detalhes_view(&self) -> Element<'_, Msg> {
+        let i = &self.info;
+        let rotulo = |t: &'static str| text(t).size(11).font(NEGRITO).color(COR_TEXTO_MUTED());
+        let mut c = Column::new().spacing(10).push(self.barras_view());
+        if i.versao.is_empty() {
+            c = c.push(
+                text(
+                    "Os detalhes aparecem depois da primeira mensagem, quando o Claude Code abre.",
+                )
+                .size(12)
+                .color(COR_TEXTO_MUTED()),
+            );
+        } else {
+            c = c.push(text(format!("{} · Claude Code {}", i.modelo, i.versao)).size(12));
+            let mcp = i.mcp.iter().map(|(nome, estado)| {
+                let (cor, frase) = match estado.as_str() {
+                    "connected" => (VERDE, "conectado"),
+                    "pending" => (AMARELO, "conectando"),
+                    "needs-auth" => (AMARELO, "precisa de login"),
+                    "failed" => (COR_ERRO(), "falhou"),
+                    outro => (COR_TEXTO_MUTED(), outro),
+                };
+                row![
+                    text("●").size(8).color(cor),
+                    text(nome).size(12),
+                    horizontal_space(),
+                    text(frase).size(11).color(COR_TEXTO_MUTED())
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .into()
+            });
+            c = c.push(
+                column![
+                    rotulo("SERVIDORES MCP"),
+                    Column::with_children(mcp).spacing(3)
+                ]
+                .spacing(4),
+            );
+            c = c.push(
+                column![
+                    rotulo("PLUGINS"),
+                    text(if i.plugins.is_empty() {
+                        "Nenhum".into()
+                    } else {
+                        i.plugins.join(", ")
+                    })
+                    .size(12)
+                ]
+                .spacing(4),
+            );
+            c = c.push(
+                text(format!(
+                    "{} skills · {} comandos · agentes: {}",
+                    i.skills,
+                    i.comandos,
+                    i.agentes.join(", ")
+                ))
+                .size(12)
+                .color(COR_TEXTO_MUTED()),
+            );
+        }
+        container(c)
+            .padding(10)
+            .width(Length::Fill)
+            .style(|_| container::Style {
+                border: Border {
+                    color: COR_BORDA(),
+                    width: 1.0,
+                    radius: 6.0.into(),
+                },
+                ..fundo(COR_PAINEL())
+            })
+            .into()
+    }
+
     fn status_view(&self) -> Element<'_, Msg> {
         let (pos, lingua) = match self.aba() {
             Some(a) => {
                 let (l, c) = a.conteudo.cursor_position();
-                (format!("Ln {}, Col {}", l + 1, c + 1), linguagem(&a.caminho))
+                (
+                    format!("Ln {}, Col {}", l + 1, c + 1),
+                    linguagem(&a.caminho),
+                )
             }
             None => (String::new(), String::new()),
         };
         let esquerda: Element<Msg> = if self.aviso.is_empty() {
-            text(self.ramo.clone().unwrap_or_default()).size(11).into()
+            text(if self.inicio { String::new() } else { self.ramo.clone().unwrap_or_default() }).size(11).into()
         } else {
             text(&self.aviso).size(11).color(COR_ERRO()).into()
         };
-        container(row![esquerda, horizontal_space(), text(pos).size(11), text("UTF-8").size(11), text(lingua).size(11)].spacing(18).align_y(Alignment::Center))
-            .padding([0, 12])
-            .height(ALTURA_STATUS)
-            .align_y(Alignment::Center)
-            .style(|_| container::Style { text_color: Some(COR_TEXTO_MUTED()), ..fundo(COR_CROMO()) })
-            .into()
+        container(
+            row![
+                esquerda,
+                horizontal_space(),
+                text(pos).size(11),
+                text("UTF-8").size(11),
+                text(lingua).size(11)
+            ]
+            .spacing(18)
+            .align_y(Alignment::Center),
+        )
+        .padding([0, 12])
+        .height(ALTURA_STATUS)
+        .align_y(Alignment::Center)
+        .style(|_| container::Style {
+            text_color: Some(COR_TEXTO_MUTED()),
+            ..fundo(COR_CROMO())
+        })
+        .into()
     }
 }
 
@@ -725,22 +1312,57 @@ fn item_view(i: usize, item: &Item) -> Element<'_, Msg> {
         Item::Eu(t) => container(text(t).size(13))
             .padding([8, 10])
             .width(Length::Fill)
-            .style(|_| container::Style { border: Border { color: COR_BORDA(), width: 1.0, radius: 6.0.into() }, ..fundo(COR_PAINEL()) })
+            .style(|_| container::Style {
+                border: Border {
+                    color: COR_BORDA(),
+                    width: 1.0,
+                    radius: 6.0.into(),
+                },
+                ..fundo(COR_PAINEL())
+            })
             .into(),
         // shortcut: resposta em texto puro; o widget markdown do Iced entra quando o bloco de código fizer falta.
         Item::Texto(md) => {
             let estilo = markdown::Style {
-                inline_code_highlight: markdown::Highlight { background: COR_HOVER().into(), border: Border { radius: 3.0.into(), ..Default::default() } },
-                inline_code_padding: iced::Padding { top: 0.0, right: 3.0, bottom: 0.0, left: 3.0 },
+                inline_code_highlight: markdown::Highlight {
+                    background: COR_HOVER().into(),
+                    border: Border {
+                        radius: 3.0.into(),
+                        ..Default::default()
+                    },
+                },
+                inline_code_padding: iced::Padding {
+                    top: 0.0,
+                    right: 3.0,
+                    bottom: 0.0,
+                    left: 3.0,
+                },
                 inline_code_color: COR_TEXTO(),
                 link_color: COR_AZUL_ACENTO(),
             };
-            markdown::view(md, markdown::Settings { code_size: 12.into(), ..markdown::Settings::with_text_size(13) }, estilo).map(Msg::Link)
+            markdown::view(
+                md,
+                markdown::Settings {
+                    code_size: 12.into(),
+                    ..markdown::Settings::with_text_size(13)
+                },
+                estilo,
+            )
+            .map(Msg::Link)
         }
         Item::Ferramenta { frase, erro, .. } => passo(frase, *erro),
         Item::Aviso(t) => text(t).size(12).color(COR_ERRO()).into(),
-        Item::Pedido { frase, previa, resposta, .. } => {
-            let mut cartao = Column::new().push(container(text(frase).size(12).font(MONO)).padding([7, 10]).width(Length::Fill));
+        Item::Pedido {
+            frase,
+            previa,
+            resposta,
+            ..
+        } => {
+            let mut cartao = Column::new().push(
+                container(text(frase).size(12).font(MONO))
+                    .padding([7, 10])
+                    .width(Length::Fill),
+            );
             if !previa.is_empty() {
                 let linhas = previa.iter().map(|(s, l)| {
                     let (cor, faixa) = match s {
@@ -748,48 +1370,103 @@ fn item_view(i: usize, item: &Item) -> Element<'_, Msg> {
                         '+' => (VERDE, mistura_cor(COR_PAINEL(), VERDE, 0.18)),
                         _ => (COR_TEXTO_MUTED(), Color::TRANSPARENT),
                     };
-                    container(text(format!("{s} {l}")).font(MONO).size(11).color(cor).wrapping(Wrapping::None)).padding([1, 10]).width(Length::Shrink).style(move |_| fundo(faixa)).into()
+                    container(
+                        text(format!("{s} {l}"))
+                            .font(MONO)
+                            .size(11)
+                            .color(cor)
+                            .wrapping(Wrapping::None),
+                    )
+                    .padding([1, 10])
+                    .width(Length::Shrink)
+                    .style(move |_| fundo(faixa))
+                    .into()
                 });
                 // Linha comprida rola de lado em vez de quebrar: o diff tem que ser lido como está.
                 let diff = scrollable(Column::with_children(linhas))
-                    .direction(scrollable::Direction::Horizontal(scrollable::Scrollbar::new().width(4).scroller_width(4)))
+                    .direction(scrollable::Direction::Horizontal(
+                        scrollable::Scrollbar::new().width(4).scroller_width(4),
+                    ))
                     .style(rolagem_discreta);
                 cartao = cartao.push(linha_horizontal()).push(diff);
             }
             let fim: Element<Msg> = match resposta {
                 Resposta::Pendente => column![
                     opcao("1", "Permitir", Msg::Responder(i, Resposta::Gravou), true),
-                    opcao("2", "Permitir e não perguntar nesta sessão", Msg::Responder(i, Resposta::Sempre), false),
-                    opcao("3", "Não, explicar o que mudar", Msg::Responder(i, Resposta::Recusou), false),
+                    opcao(
+                        "2",
+                        "Permitir e não perguntar nesta sessão",
+                        Msg::Responder(i, Resposta::Sempre),
+                        false
+                    ),
+                    opcao(
+                        "3",
+                        "Não, explicar o que mudar",
+                        Msg::Responder(i, Resposta::Recusou),
+                        false
+                    ),
                 ]
                 .padding(6)
                 .into(),
-                Resposta::Recusou => container(text("Recusado").size(12).color(COR_ERRO())).padding([6, 10]).into(),
-                _ => container(text("Permitido").size(12).color(VERDE)).padding([6, 10]).into(),
+                Resposta::Recusou => container(text("Recusado").size(12).color(COR_ERRO()))
+                    .padding([6, 10])
+                    .into(),
+                _ => container(text("Permitido").size(12).color(VERDE))
+                    .padding([6, 10])
+                    .into(),
             };
             let pendente = *resposta == Resposta::Pendente;
             container(cartao.push(fim))
                 .width(Length::Fill)
-                .style(move |_| container::Style { border: Border { color: if pendente { COR_AZUL_ACENTO() } else { COR_BORDA() }, width: 1.0, radius: 6.0.into() }, ..fundo(COR_PAINEL()) })
+                .style(move |_| container::Style {
+                    border: Border {
+                        color: if pendente {
+                            COR_AZUL_ACENTO()
+                        } else {
+                            COR_BORDA()
+                        },
+                        width: 1.0,
+                        radius: 6.0.into(),
+                    },
+                    ..fundo(COR_PAINEL())
+                })
                 .into()
         }
     }
 }
 
 fn passo(frase: &str, erro: bool) -> Element<'_, Msg> {
-    row![text("●").size(8).color(if erro { COR_ERRO() } else { VERDE }), text(frase).size(12).color(COR_TEXTO_MUTED())]
-        .spacing(8)
-        .align_y(Alignment::Center)
-        .into()
+    row![
+        text("●")
+            .size(8)
+            .color(if erro { COR_ERRO() } else { VERDE }),
+        text(frase).size(12).color(COR_TEXTO_MUTED())
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center)
+    .into()
 }
 
 fn linha_do_tempo(passos: Vec<Element<'_, Msg>>) -> Element<'_, Msg> {
-    Column::with_children(passos).spacing(6).padding(iced::Padding { top: 0.0, right: 0.0, bottom: 0.0, left: 4.0 }).into()
+    Column::with_children(passos)
+        .spacing(6)
+        .padding(iced::Padding {
+            top: 0.0,
+            right: 0.0,
+            bottom: 0.0,
+            left: 4.0,
+        })
+        .into()
 }
 
 /// Números das linhas: três textos (antes, a linha do cursor, depois) com a mesma métrica do editor.
 fn calha<'a>(total: usize, linha_cursor: usize, largura: f32, altura: f32) -> Element<'a, Msg> {
-    let numeros = |de: usize, ate: usize| (de..=ate).map(|n| n.to_string()).collect::<Vec<_>>().join("\n");
+    let numeros = |de: usize, ate: usize| {
+        (de..=ate)
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
     let numero = |s: String, cor: Color| {
         text(s)
             .font(MONO)
@@ -808,11 +1485,16 @@ fn calha<'a>(total: usize, linha_cursor: usize, largura: f32, altura: f32) -> El
     if linha_cursor < total {
         col = col.push(numero(numeros(linha_cursor + 1, total), COR_TEXTO_MUTED()));
     }
-    container(col.padding(iced::Padding { top: 0.0, right: 12.0, bottom: 0.0, left: 4.0 }))
-        .width(largura)
-        .height(altura)
-        .style(|_| fundo(COR_PAINEL()))
-        .into()
+    container(col.padding(iced::Padding {
+        top: 0.0,
+        right: 12.0,
+        bottom: 0.0,
+        left: 4.0,
+    }))
+    .width(largura)
+    .height(altura)
+    .style(|_| fundo(COR_PAINEL()))
+    .into()
 }
 
 fn opcao<'a>(tecla: &'a str, rotulo: &'a str, msg: Msg, foco: bool) -> Element<'a, Msg> {
@@ -824,15 +1506,35 @@ fn opcao<'a>(tecla: &'a str, rotulo: &'a str, msg: Msg, foco: bool) -> Element<'
         .into()
 }
 
-fn barra_uso(rotulo: &str, uso: Option<f32>) -> Element<'_, Msg> {
-    let u = uso.unwrap_or(0.0);
+/// "25 mil", "1,2 mi": tokens do jeito que se lê.
+fn tokens(n: u64) -> String {
+    match n {
+        0..1_000 => n.to_string(),
+        1_000..1_000_000 => format!("{} mil", n / 1_000),
+        _ => format!("{:.1} mi", n as f64 / 1e6)
+            .replace(".0 ", " ")
+            .replace('.', ","),
+    }
+}
+
+fn barra(rotulo: &str, fracao: f32, valor: String) -> Element<'_, Msg> {
+    let u = fracao.clamp(0.0, 1.0);
     column![
-        row![text(rotulo).size(11).color(COR_TEXTO_MUTED()), horizontal_space(), text(format!("{:.0}%", u * 100.0)).size(11).color(COR_TEXTO_MUTED())],
-        progress_bar(0.0..=1.0, u).height(4).style(|_| progress_bar::Style {
-            background: COR_BORDA().into(),
-            bar: COR_AZUL_ACENTO().into(),
-            border: Border { radius: 2.0.into(), ..Default::default() },
-        }),
+        row![
+            text(rotulo).size(11).color(COR_TEXTO_MUTED()),
+            horizontal_space(),
+            text(valor).size(11).color(COR_TEXTO_MUTED())
+        ],
+        progress_bar(0.0..=1.0, u)
+            .height(4)
+            .style(|_| progress_bar::Style {
+                background: COR_BORDA().into(),
+                bar: COR_AZUL_ACENTO().into(),
+                border: Border {
+                    radius: 2.0.into(),
+                    ..Default::default()
+                },
+            }),
     ]
     .spacing(4)
     .into()
@@ -871,7 +1573,10 @@ fn ramo(pasta: &Path) -> Option<String> {
 }
 
 fn linguagem(caminho: &Path) -> String {
-    let ext = caminho.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    let ext = caminho
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
     match ext.as_str() {
         "rs" => "Rust",
         "toml" => "TOML",
@@ -893,27 +1598,50 @@ fn linguagem(caminho: &Path) -> String {
 }
 
 fn mistura_cor(a: Color, b: Color, t: f32) -> Color {
-    Color { r: a.r + (b.r - a.r) * t, g: a.g + (b.g - a.g) * t, b: a.b + (b.b - a.b) * t, a: 1.0 }
+    Color {
+        r: a.r + (b.r - a.r) * t,
+        g: a.g + (b.g - a.g) * t,
+        b: a.b + (b.b - a.b) * t,
+        a: 1.0,
+    }
 }
 
 fn fundo(cor: Color) -> container::Style {
-    container::Style { background: Some(cor.into()), text_color: Some(COR_TEXTO()), ..Default::default() }
+    container::Style {
+        background: Some(cor.into()),
+        text_color: Some(COR_TEXTO()),
+        ..Default::default()
+    }
 }
 
 fn linha_vertical<'a>() -> Element<'a, Msg> {
-    container(Space::with_width(1)).height(Length::Fill).style(|_| fundo(COR_BORDA_SUAVE())).into()
+    container(Space::with_width(1))
+        .height(Length::Fill)
+        .style(|_| fundo(COR_BORDA_SUAVE()))
+        .into()
 }
 
 fn linha_horizontal<'a>() -> Element<'a, Msg> {
-    container(Space::with_height(1)).width(Length::Fill).style(|_| fundo(COR_BORDA_SUAVE())).into()
+    container(Space::with_height(1))
+        .width(Length::Fill)
+        .style(|_| fundo(COR_BORDA_SUAVE()))
+        .into()
 }
 
 fn botao_texto<'a>(conteudo: impl Into<Element<'a, Msg>>, msg: Msg) -> Element<'a, Msg> {
-    button(conteudo).on_press(msg).padding([4, 8]).style(|_, s| item_lista(false, s, 4.0)).into()
+    button(conteudo)
+        .on_press(msg)
+        .padding([4, 8])
+        .style(|_, s| item_lista(false, s, 4.0))
+        .into()
 }
 
 fn botao_icone<'a>(nome: &str, msg: Msg) -> Element<'a, Msg> {
-    button(container(icone_traco(nome, 14.0)).center(22)).on_press(msg).padding(0).style(|_, s| item_lista(false, s, 4.0)).into()
+    button(container(icone_traco(nome, 14.0)).center(22))
+        .on_press(msg)
+        .padding(0)
+        .style(|_, s| item_lista(false, s, 4.0))
+        .into()
 }
 
 fn item_lista(ativo: bool, s: button::Status, raio: f32) -> button::Style {
@@ -922,21 +1650,65 @@ fn item_lista(ativo: bool, s: button::Status, raio: f32) -> button::Style {
         (_, button::Status::Hovered | button::Status::Pressed) => Some(COR_HOVER().into()),
         _ => None,
     };
-    button::Style { background: fundo, text_color: if ativo { COR_AZUL_ACENTO() } else { COR_TEXTO() }, border: Border { radius: raio.into(), ..Default::default() }, ..Default::default() }
+    button::Style {
+        background: fundo,
+        text_color: if ativo {
+            COR_AZUL_ACENTO()
+        } else {
+            COR_TEXTO()
+        },
+        border: Border {
+            radius: raio.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
 }
 
 fn aba_estilo(ativa: bool, s: button::Status) -> button::Style {
-    let fundo = if ativa { Some(COR_PAINEL().into()) } else if matches!(s, button::Status::Hovered) { Some(COR_HOVER().into()) } else { None };
-    button::Style { background: fundo, text_color: if ativa { COR_TEXTO() } else { COR_TEXTO_MUTED() }, ..Default::default() }
+    let fundo = if ativa {
+        Some(COR_PAINEL().into())
+    } else if matches!(s, button::Status::Hovered) {
+        Some(COR_HOVER().into())
+    } else {
+        None
+    };
+    button::Style {
+        background: fundo,
+        text_color: if ativa {
+            COR_TEXTO()
+        } else {
+            COR_TEXTO_MUTED()
+        },
+        ..Default::default()
+    }
 }
 
 fn botao_enviar(_: &iced::Theme, s: button::Status) -> button::Style {
-    let cor = if matches!(s, button::Status::Hovered) { mistura_cor(COR_AZUL_ACENTO(), COR_TEXTO(), 0.15) } else { COR_AZUL_ACENTO() };
-    button::Style { background: Some(cor.into()), border: Border { radius: 5.0.into(), ..Default::default() }, ..Default::default() }
+    let cor = if matches!(s, button::Status::Hovered) {
+        mistura_cor(COR_AZUL_ACENTO(), COR_TEXTO(), 0.15)
+    } else {
+        COR_AZUL_ACENTO()
+    };
+    button::Style {
+        background: Some(cor.into()),
+        border: Border {
+            radius: 5.0.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
 }
 
 fn campo_sem_borda(t: &iced::Theme, s: text_input::Status) -> text_input::Style {
-    text_input::Style { background: Color::TRANSPARENT.into(), border: Border::default(), value: COR_TEXTO(), placeholder: COR_TEXTO_MUTED(), selection: COR_AZUL_FUNDO(), ..text_input::default(t, s) }
+    text_input::Style {
+        background: Color::TRANSPARENT.into(),
+        border: Border::default(),
+        value: COR_TEXTO(),
+        placeholder: COR_TEXTO_MUTED(),
+        selection: COR_AZUL_FUNDO(),
+        ..text_input::default(t, s)
+    }
 }
 
 fn lista_sem_borda(_: &iced::Theme, s: pick_list::Status) -> pick_list::Style {
@@ -944,8 +1716,15 @@ fn lista_sem_borda(_: &iced::Theme, s: pick_list::Status) -> pick_list::Style {
         text_color: COR_TEXTO_MUTED(),
         placeholder_color: COR_TEXTO_MUTED(),
         handle_color: COR_TEXTO_MUTED(),
-        background: if matches!(s, pick_list::Status::Hovered | pick_list::Status::Opened) { COR_HOVER().into() } else { Color::TRANSPARENT.into() },
-        border: Border { radius: 4.0.into(), ..Default::default() },
+        background: if matches!(s, pick_list::Status::Hovered | pick_list::Status::Opened) {
+            COR_HOVER().into()
+        } else {
+            Color::TRANSPARENT.into()
+        },
+        border: Border {
+            radius: 4.0.into(),
+            ..Default::default()
+        },
     }
 }
 
@@ -956,7 +1735,10 @@ fn rolagem_discreta(t: &iced::Theme, s: scrollable::Status) -> scrollable::Style
         trilho.background = None;
         trilho.border = Border::default();
         trilho.scroller.color = COR_BORDA();
-        trilho.scroller.border = Border { radius: 3.0.into(), ..Default::default() };
+        trilho.scroller.border = Border {
+            radius: 3.0.into(),
+            ..Default::default()
+        };
     }
     estilo
 }
