@@ -292,6 +292,8 @@ impl Code {
         if std::env::var_os("FEATHERCODE_CAPTURAR_EXEMPLO").is_some() {
             code.itens = agente::exemplo();
             code.uso = (Some(0.43), Some(0.63));
+            code.contexto = (420_000, 1_000_000);
+            code.info.modelo = "claude-opus-5-5[1m]".into();
         }
         code.atualizar_recentes();
         (
@@ -1276,8 +1278,6 @@ impl Code {
         let mut corpo = Column::new().spacing(12).padding([14, 14]);
         if self.detalhes {
             corpo = corpo.push(self.detalhes_view());
-        } else if self.uso.0.is_some() || self.uso.1.is_some() || self.contexto.0 > 0 {
-            corpo = corpo.push(self.barras_view());
         }
         if self.itens.is_empty() {
             corpo = corpo.push(
@@ -1349,6 +1349,10 @@ impl Code {
                 .style(lista_sem_borda)
                 .menu_style(tema::estilo_menu_popup),
             horizontal_space(),
+            text(nome_modelo(&self.info.modelo))
+                .size(12)
+                .color(COR_TEXTO_MUTED()),
+            self.anel(),
             acao,
         ]
         .spacing(8)
@@ -1427,6 +1431,30 @@ impl Code {
             container(text(frase).size(11))
                 .padding([3, 8])
                 .style(tema::estilo_dica),
+            tooltip::Position::Top,
+        )
+        .into()
+    }
+
+    /// Anel do contexto usado, como no app do Claude; a dica mostra contexto, sessão e semana.
+    fn anel(&self) -> Element<'_, Msg> {
+        let (usados, janela) = self.contexto;
+        let fracao = if janela > 0 {
+            usados as f32 / janela as f32
+        } else {
+            0.0
+        };
+        let desenho = iced::widget::canvas(Anel(fracao)).width(16).height(16);
+        let dica: Element<Msg> = if usados == 0 && self.uso.0.is_none() {
+            text("O uso aparece depois da primeira resposta.")
+                .size(11)
+                .into()
+        } else {
+            container(self.barras_view()).width(240).into()
+        };
+        tooltip(
+            desenho,
+            container(dica).padding([8, 10]).style(tema::estilo_dica),
             tooltip::Position::Top,
         )
         .into()
@@ -1789,6 +1817,84 @@ fn tokens(n: u64) -> String {
     }
 }
 
+struct Anel(f32);
+
+impl<M> iced::widget::canvas::Program<M> for Anel {
+    type State = ();
+
+    fn draw(
+        &self,
+        _: &(),
+        renderer: &iced::Renderer,
+        _: &iced::Theme,
+        bounds: iced::Rectangle,
+        _: iced::mouse::Cursor,
+    ) -> Vec<iced::widget::canvas::Geometry> {
+        use iced::widget::canvas::{path, Frame, Path, Stroke};
+        let mut frame = Frame::new(renderer, bounds.size());
+        let centro = frame.center();
+        let raio = bounds.width.min(bounds.height) / 2.0 - 2.0;
+        frame.stroke(
+            &Path::circle(centro, raio),
+            Stroke::default().with_width(2.5).with_color(COR_BORDA()),
+        );
+        let f = self.0.clamp(0.0, 1.0);
+        if f > 0.0 {
+            let cor = if f > 0.9 {
+                COR_ERRO()
+            } else if f > 0.75 {
+                AMARELO
+            } else {
+                COR_AZUL_ACENTO()
+            };
+            let inicio = -std::f32::consts::FRAC_PI_2;
+            let arco = Path::new(|b| {
+                b.arc(path::Arc {
+                    center: centro,
+                    radius: raio,
+                    start_angle: iced::Radians(inicio),
+                    end_angle: iced::Radians(inicio + f * std::f32::consts::TAU),
+                })
+            });
+            frame.stroke(
+                &arco,
+                Stroke::default()
+                    .with_width(2.5)
+                    .with_color(cor)
+                    .with_line_cap(iced::widget::canvas::LineCap::Round),
+            );
+        }
+        vec![frame.into_geometry()]
+    }
+}
+
+/// `claude-opus-5-5[1m]` vira `Opus 5.5`.
+fn nome_modelo(id: &str) -> String {
+    let id = id
+        .split('[')
+        .next()
+        .unwrap_or(id)
+        .trim_start_matches("claude-");
+    let mut partes = id.split('-');
+    let Some(nome) = partes.next().filter(|n| !n.is_empty()) else {
+        return String::new();
+    };
+    let versao: Vec<&str> = partes
+        .take_while(|p| p.len() <= 2 && p.chars().all(|c| c.is_ascii_digit()))
+        .collect();
+    let mut nome: String = nome
+        .chars()
+        .take(1)
+        .flat_map(char::to_uppercase)
+        .chain(nome.chars().skip(1))
+        .collect();
+    if !versao.is_empty() {
+        nome.push(' ');
+        nome.push_str(&versao.join("."));
+    }
+    nome
+}
+
 fn barra(rotulo: &str, fracao: f32, valor: String) -> Element<'_, Msg> {
     let u = fracao.clamp(0.0, 1.0);
     column![
@@ -2064,4 +2170,14 @@ fn rolagem_discreta(t: &iced::Theme, s: scrollable::Status) -> scrollable::Style
 }
 
 #[cfg(test)]
-mod testes {}
+mod testes {
+    #[test]
+    fn nome_curto_do_modelo() {
+        assert_eq!(super::nome_modelo("claude-opus-5-5[1m]"), "Opus 5.5");
+        assert_eq!(
+            super::nome_modelo("claude-sonnet-4-5-20250929"),
+            "Sonnet 4.5"
+        );
+        assert_eq!(super::nome_modelo(""), "");
+    }
+}

@@ -10,7 +10,7 @@ publish = false
 
 [dependencies]
 feather-ui = { git = "https://github.com/feather-works/feather-ui", tag = "v0.2.10" }
-iced = { version = "0.13", features = ["svg", "tokio", "highlighter", "markdown", "auto-detect-theme"] }
+iced = { version = "0.13", features = ["svg", "tokio", "highlighter", "markdown", "auto-detect-theme", "canvas"] }
 # Mesma escolha do FeatherSheet: diálogo nativo pelo portal, sem GTK.
 rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
 serde_json = "1"
