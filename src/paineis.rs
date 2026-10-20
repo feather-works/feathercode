@@ -205,9 +205,14 @@ pub async fn diff_git(raiz: PathBuf, caminho: PathBuf) -> Result<Diff, String> {
             .current_dir(&raiz)
             .output()
     };
-    let saida = rodar(vec!["diff".as_ref(), "HEAD".as_ref(), "--".as_ref(), caminho.as_os_str()])
-        .await
-        .map_err(|e| format!("Não deu para rodar o git: {e}"))?;
+    let saida = rodar(vec![
+        "diff".as_ref(),
+        "HEAD".as_ref(),
+        "--".as_ref(),
+        caminho.as_os_str(),
+    ])
+    .await
+    .map_err(|e| format!("Não deu para rodar o git: {e}"))?;
     let mut texto = String::from_utf8_lossy(&saida.stdout).into_owned();
     if texto.trim().is_empty() && caminho.exists() {
         // `--no-index` sai com código 1 quando há diferença: o que vale é a saída.
@@ -232,7 +237,13 @@ pub async fn diff_git(raiz: PathBuf, caminho: PathBuf) -> Result<Diff, String> {
 /// O que um commit mudou nesse arquivo (contra o primeiro pai, se for merge).
 pub async fn diff_do_commit(raiz: PathBuf, hash: String, caminho: PathBuf) -> Result<Diff, String> {
     let saida = tokio::process::Command::new("git")
-        .args(["show", "--format=", "--diff-merges=first-parent", &hash, "--"])
+        .args([
+            "show",
+            "--format=",
+            "--diff-merges=first-parent",
+            &hash,
+            "--",
+        ])
         .arg(&caminho)
         .current_dir(&raiz)
         .output()
@@ -254,7 +265,13 @@ pub async fn arquivos_do_commit(
     hash: String,
 ) -> Result<(String, Vec<(String, PathBuf)>), String> {
     let saida = tokio::process::Command::new("git")
-        .args(["show", "--format=", "--name-status", "--diff-merges=first-parent", &hash])
+        .args([
+            "show",
+            "--format=",
+            "--name-status",
+            "--diff-merges=first-parent",
+            &hash,
+        ])
         .current_dir(&raiz)
         .output()
         .await
@@ -387,11 +404,17 @@ impl Code {
                         .width(22)
                         .height(22)
                         .style(move |_, s| iced::widget::svg::Style {
-                            color: Some(if ativo || matches!(s, iced::widget::svg::Status::Hovered) {
-                                if ativo { COR_AZUL_ACENTO() } else { COR_TEXTO() }
-                            } else {
-                                COR_TEXTO_MUTED()
-                            }),
+                            color: Some(
+                                if ativo || matches!(s, iced::widget::svg::Status::Hovered) {
+                                    if ativo {
+                                        COR_AZUL_ACENTO()
+                                    } else {
+                                        COR_TEXTO()
+                                    }
+                                } else {
+                                    COR_TEXTO_MUTED()
+                                },
+                            ),
                         }),
                 )
                 .center(Length::Fill),
@@ -406,7 +429,11 @@ impl Code {
                     radius: 1.0.into(),
                     ..Default::default()
                 },
-                ..fundo(if ativo { COR_AZUL_ACENTO() } else { Color::TRANSPARENT })
+                ..fundo(if ativo {
+                    COR_AZUL_ACENTO()
+                } else {
+                    Color::TRANSPARENT
+                })
             });
             tooltip(
                 row![filete, b].align_y(Alignment::Center),
@@ -431,7 +458,12 @@ impl Code {
                 lado == Some(Lado::Buscar),
                 Msg::Lado(Lado::Buscar)
             ),
-            botao(ICONE_GIT, "Git", lado == Some(Lado::Git), Msg::Lado(Lado::Git)),
+            botao(
+                ICONE_GIT,
+                "Git",
+                lado == Some(Lado::Git),
+                Msg::Lado(Lado::Git)
+            ),
             botao(
                 ICONE_AGENTE,
                 "Painel do agente",
@@ -624,9 +656,7 @@ impl Code {
                     ..button::Style::default()
                 });
                 let mut c = Column::new()
-                    .push(
-                        container(column![mensagem, commit].spacing(6)).padding([4, 12]),
-                    )
+                    .push(container(column![mensagem, commit].spacing(6)).padding([4, 12]))
                     .push(Space::with_height(6))
                     .push(subtitulo_git(format!("Mudanças ({})", g.mudancas.len())));
                 if g.mudancas.is_empty() {
@@ -757,7 +787,7 @@ impl Code {
             ],
             _ => {
                 let mut v = vec![("Nova conversa", "", Msg::NovaConversa, false)];
-                if self.ocupado {
+                if self.chat.ocupado {
                     v.push(("Parar resposta", "Esc", Msg::Parar, false));
                 }
                 v
@@ -907,7 +937,13 @@ fn cor_do_ramo(coluna: usize) -> Color {
 
 impl Code {
     /// Arquivo mudado (em Mudanças ou dentro de um commit do gráfico): nome e sigla colorida.
-    fn linha_mudanca<'a>(&self, sigla: &str, p: &Path, ao_clicar: Msg, recuo: f32) -> Element<'a, Msg> {
+    fn linha_mudanca<'a>(
+        &self,
+        sigla: &str,
+        p: &Path,
+        ao_clicar: Msg,
+        recuo: f32,
+    ) -> Element<'a, Msg> {
         let cor = match sigla {
             "M" | "MM" | "AM" => AMARELO,
             "D" => COR_ERRO(),

@@ -699,6 +699,7 @@ impl Code {
                 ),
                 Some(Some(v)) => {
                     let uso = self
+                        .chat
                         .uso
                         .0
                         .map_or("Pronto para o painel do agente".into(), |u| {

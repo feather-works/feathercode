@@ -139,6 +139,8 @@ enum Msg {
     Enviar,
     Parar,
     NovaConversa,
+    TrocarChat(u64),
+    EventoChat(u64, agente::Evento),
     Modo(Modo),
     Provedor(agente::Provedor),
     Agente(agente::Evento),
@@ -194,15 +196,7 @@ enum Msg {
     Desfazer(bool),
 }
 
-struct Code {
-    /// Página inicial à mostra (nenhuma pasta aberta ainda, ou a pessoa voltou para ela).
-    inicio: bool,
-    config: config::Config,
-    ini: inicio::Estado,
-    arvore: arvore::Arvore,
-    abas: Vec<Aba>,
-    ativa: usize,
-    /// Muda a cada conversa nova: a subscription troca de id e o processo antigo morre.
+struct Chat {
     conversa: u64,
     ligado: bool,
     canal: Option<UnboundedSender<String>>,
@@ -220,6 +214,44 @@ struct Code {
     contexto: (u64, u64),
     detalhes: bool,
     proximo_controle: u64,
+    retomar: Option<String>,
+    historico: Option<Vec<agente::Sessao>>,
+}
+
+impl Chat {
+    fn novo(id: u64, provedor: agente::Provedor, modo: Modo) -> Self {
+        Self {
+            conversa: id,
+            ligado: false,
+            canal: None,
+            fila: Vec::new(),
+            itens: Vec::new(),
+            ocupado: false,
+            pedido: String::new(),
+            modo,
+            provedor,
+            uso: (None, None),
+            info: agente::Info::default(),
+            contexto: (0, 0),
+            detalhes: false,
+            proximo_controle: 0,
+            retomar: None,
+            historico: None,
+        }
+    }
+}
+
+struct Code {
+    /// Página inicial à mostra (nenhuma pasta aberta ainda, ou a pessoa voltou para ela).
+    inicio: bool,
+    config: config::Config,
+    ini: inicio::Estado,
+    arvore: arvore::Arvore,
+    abas: Vec<Aba>,
+    ativa: usize,
+    chat: Chat,
+    outros_chats: Vec<Chat>,
+    proximo_chat: u64,
     terminais: terminal::Terminais,
     aviso: String,
     ramo: Option<String>,
@@ -240,10 +272,6 @@ struct Code {
     buscando: bool,
     git: Option<Result<paineis::EstadoGit, String>>,
     menu: Option<usize>,
-    /// Conversa guardada que o próximo `claude` continua (`--resume`).
-    retomar: Option<String>,
-    /// Lista do histórico à mostra no painel do agente.
-    historico: Option<Vec<agente::Sessao>>,
     /// Texto do campo "Procurar arquivo" do explorador.
     filtro: String,
     /// Lida na primeira letra do filtro; vazia de novo quando a pasta muda.
@@ -251,6 +279,12 @@ struct Code {
 }
 
 impl Code {
+    fn trocar_chat(&mut self, id: u64) {
+        if let Some(i) = self.outros_chats.iter().position(|c| c.conversa == id) {
+            std::mem::swap(&mut self.chat, &mut self.outros_chats[i]);
+        }
+    }
+
     fn novo(mut config: config::Config) -> (Self, Task<Msg>) {
         // Sem pasta na linha de comando, abre na página inicial.
         let pedida = std::env::args_os()
@@ -271,20 +305,9 @@ impl Code {
             arvore: arvore::Arvore::nova(pasta.clone()),
             abas: Vec::new(),
             ativa: 0,
-            conversa: 0,
-            ligado: false,
-            canal: None,
-            fila: Vec::new(),
-            itens: Vec::new(),
-            ocupado: false,
-            pedido: String::new(),
-            modo: Modo::Perguntar,
-            provedor: agente::Provedor::Claude,
-            uso: (None, None),
-            info: agente::Info::default(),
-            contexto: (0, 0),
-            detalhes: false,
-            proximo_controle: 0,
+            chat: Chat::novo(0, agente::Provedor::Claude, Modo::Perguntar),
+            outros_chats: Vec::new(),
+            proximo_chat: 1,
             terminais: terminal::Terminais::default(),
             aviso: String::new(),
             ramo: ramo(&pasta),
@@ -302,8 +325,6 @@ impl Code {
             buscando: false,
             git: None,
             menu: None,
-            retomar: None,
-            historico: None,
             filtro: String::new(),
             todos_arquivos: Vec::new(),
         };
@@ -326,13 +347,13 @@ impl Code {
             code.menu = Some(i);
         }
         if std::env::var_os("FEATHERCODE_CAPTURAR_HISTORICO").is_some() {
-            code.historico = Some(agente::sessoes(&code.arvore.raiz));
+            code.chat.historico = Some(agente::sessoes(&code.arvore.raiz));
         }
         if std::env::var_os("FEATHERCODE_CAPTURAR_EXEMPLO").is_some() {
-            code.itens = agente::exemplo();
-            code.uso = (Some(0.43), Some(0.63));
-            code.contexto = (420_000, 1_000_000);
-            code.info.modelo = "claude-opus-5-5[1m]".into();
+            code.chat.itens = agente::exemplo();
+            code.chat.uso = (Some(0.43), Some(0.63));
+            code.chat.contexto = (420_000, 1_000_000);
+            code.chat.info.modelo = "claude-opus-5-5[1m]".into();
         }
         code.atualizar_recentes();
         // FEATHERCODE_CAPTURAR_GIT=1 abre o painel Git na foto.
@@ -343,7 +364,10 @@ impl Code {
             Task::none()
         };
         if let Some(arquivo) = std::env::var_os("FEATHERCODE_CAPTURAR_DIFF") {
-            git = Task::batch([git, code.update(Msg::VerDiff(code.arvore.raiz.join(arquivo)))]);
+            git = Task::batch([
+                git,
+                code.update(Msg::VerDiff(code.arvore.raiz.join(arquivo))),
+            ]);
         }
         (
             code,
@@ -373,31 +397,36 @@ impl Code {
             teclas,
             window::resize_events().map(|(_, s)| Msg::Tamanho(s)),
         ];
-        if self.ligado {
-            let conversa = agente::conversa(
-                self.provedor,
-                self.arvore.raiz.clone(),
-                self.modo.id(),
-                self.retomar.clone(),
-            );
-            subs.push(
-                Subscription::run_with_id(("agente", self.conversa), conversa).map(Msg::Agente),
-            );
+        for chat in std::iter::once(&self.chat).chain(self.outros_chats.iter()) {
+            if chat.ligado {
+                let id = chat.conversa;
+                let conversa = agente::conversa(
+                    chat.provedor,
+                    self.arvore.raiz.clone(),
+                    chat.modo.id(),
+                    chat.retomar.clone(),
+                );
+                subs.push(
+                    Subscription::run_with_id(("agente", id), conversa)
+                        .with(id)
+                        .map(|(id, evento)| Msg::EventoChat(id, evento)),
+                );
+            }
         }
         subs.push(self.terminais.subscription());
         Subscription::batch(subs)
     }
 
     fn enviar(&mut self, linha: String) {
-        match &self.canal {
+        match &self.chat.canal {
             Some(c) if c.send(linha.clone()).is_ok() => {}
-            _ => self.fila.push(linha),
+            _ => self.chat.fila.push(linha),
         }
     }
 
     fn controle(&mut self, pedido: serde_json::Value) {
-        self.proximo_controle += 1;
-        let linha = agente::controle(self.proximo_controle, pedido);
+        self.chat.proximo_controle += 1;
+        let linha = agente::controle(self.chat.proximo_controle, pedido);
         self.enviar(linha);
     }
 
@@ -462,9 +491,9 @@ impl Code {
 
     fn sinal(&mut self, s: Sinal) {
         match s {
-            Sinal::Item(i) => self.itens.push(i),
+            Sinal::Item(i) => self.chat.itens.push(i),
             Sinal::Resultado { id, erro } => {
-                for item in self.itens.iter_mut().rev() {
+                for item in self.chat.itens.iter_mut().rev() {
                     if let Item::Ferramenta { id: i, erro: e, .. } = item {
                         if *i == id {
                             *e = erro;
@@ -474,13 +503,15 @@ impl Code {
                 }
                 self.recarregar_abas();
             }
-            Sinal::Uso(cinco, sete) => self.uso = (cinco.or(self.uso.0), sete.or(self.uso.1)),
-            Sinal::Inicio(i) => self.info = i,
-            Sinal::Contexto(n) => self.contexto.0 = n,
-            Sinal::JanelaContexto(n) => self.contexto.1 = n,
+            Sinal::Uso(cinco, sete) => {
+                self.chat.uso = (cinco.or(self.chat.uso.0), sete.or(self.chat.uso.1))
+            }
+            Sinal::Inicio(i) => self.chat.info = i,
+            Sinal::Contexto(n) => self.chat.contexto.0 = n,
+            Sinal::JanelaContexto(n) => self.chat.contexto.1 = n,
             Sinal::FimDoTurno(erro) => {
-                self.ocupado = false;
-                self.itens.extend(erro.map(Item::Aviso));
+                self.chat.ocupado = false;
+                self.chat.itens.extend(erro.map(Item::Aviso));
                 self.arvore.recarregar();
                 self.ramo = ramo(&self.arvore.raiz);
                 self.recarregar_abas();
@@ -516,7 +547,10 @@ impl Code {
         self.filtro.clear();
         self.todos_arquivos.clear();
         self.git = None;
-        self.update(Msg::NovaConversa)
+        self.outros_chats.clear();
+        self.chat = Chat::novo(self.proximo_chat, self.chat.provedor, self.chat.modo);
+        self.proximo_chat += 1;
+        Task::none()
     }
 
     fn update(&mut self, msg: Msg) -> Task<Msg> {
@@ -528,6 +562,7 @@ impl Code {
                 | Msg::Capturar
                 | Msg::Capturado(_)
                 | Msg::Agente(_)
+                | Msg::EventoChat(_, _)
                 | Msg::Tamanho(_)
                 | Msg::Term(_)
                 | Msg::Git(_)
@@ -663,7 +698,10 @@ impl Code {
             Msg::Git(r) => self.git = Some(r),
             Msg::GitRemoto(cmd) => {
                 self.terminal_aberto = true;
-                match self.terminais.rodar_git(&self.arvore.raiz, &format!("git {cmd}")) {
+                match self
+                    .terminais
+                    .rodar_git(&self.arvore.raiz, &format!("git {cmd}"))
+                {
                     Ok(_) => return self.focar_terminal(),
                     Err(e) => self.aviso = e,
                 }
@@ -802,34 +840,42 @@ impl Code {
                     }
                 }
             }
-            Msg::Pedido(t) => self.pedido = t,
+            Msg::Pedido(t) => self.chat.pedido = t,
             Msg::Enviar => {
-                let pedido = self.pedido.trim().to_string();
-                if pedido.is_empty() || self.ocupado {
+                let pedido = self.chat.pedido.trim().to_string();
+                if pedido.is_empty() || self.chat.ocupado {
                     return Task::none();
                 }
                 let linha = agente::mensagem_usuario(&format!("{pedido}{}", self.contexto()));
-                self.itens.push(Item::Eu(pedido));
-                self.pedido.clear();
-                self.ocupado = true;
-                self.ligado = true;
+                self.chat.itens.push(Item::Eu(pedido));
+                self.chat.pedido.clear();
+                self.chat.ocupado = true;
+                self.chat.ligado = true;
                 self.enviar(linha);
             }
             Msg::Parar => self.controle(serde_json::json!({"subtype": "interrupt"})),
             Msg::NovaConversa => {
-                self.conversa += 1;
-                self.ligado = false;
-                self.canal = None;
-                self.fila.clear();
-                self.itens.clear();
-                self.ocupado = false;
-                self.contexto = (0, 0);
-                self.retomar = None;
-                self.historico = None;
+                let novo = Chat::novo(self.proximo_chat, self.chat.provedor, self.chat.modo);
+                self.proximo_chat += 1;
+                self.outros_chats
+                    .push(std::mem::replace(&mut self.chat, novo));
             }
-            Msg::Detalhes => self.detalhes = !self.detalhes,
+            Msg::TrocarChat(id) => {
+                self.trocar_chat(id);
+            }
+            Msg::EventoChat(id, evento) => {
+                let anterior = self.chat.conversa;
+                if id != anterior && !self.outros_chats.iter().any(|c| c.conversa == id) {
+                    return Task::none();
+                }
+                self.trocar_chat(id);
+                let tarefa = self.update(Msg::Agente(evento));
+                self.trocar_chat(anterior);
+                return tarefa;
+            }
+            Msg::Detalhes => self.chat.detalhes = !self.chat.detalhes,
             Msg::Historico => {
-                self.historico = match self.historico {
+                self.chat.historico = match self.chat.historico {
                     Some(_) => None,
                     None => Some(agente::sessoes(&self.arvore.raiz)),
                 };
@@ -839,35 +885,36 @@ impl Code {
                 for s in agente::sinais_da_sessao(&self.arvore.raiz, &id) {
                     self.sinal(s);
                 }
-                self.ocupado = false;
-                self.retomar = Some(id);
+                self.chat.ocupado = false;
+                self.chat.retomar = Some(id);
             }
             Msg::Provedor(p) => {
-                if p != self.provedor {
+                if p != self.chat.provedor {
                     let _ = self.update(Msg::NovaConversa);
-                    self.provedor = p;
-                    self.info = agente::Info::default();
-                    self.uso = (None, None);
+                    self.chat.provedor = p;
+                    self.chat.info = agente::Info::default();
+                    self.chat.uso = (None, None);
                 }
             }
             Msg::Modo(m) => {
-                self.modo = m;
-                if self.provedor == agente::Provedor::Antigravity && self.canal.is_some() {
-                    self.itens.push(Item::Aviso(
+                self.chat.modo = m;
+                if self.chat.provedor == agente::Provedor::Antigravity && self.chat.canal.is_some()
+                {
+                    self.chat.itens.push(Item::Aviso(
                         "O Antigravity só troca de modo numa conversa nova (botão +).".into(),
                     ));
                 }
-                if self.canal.is_some() {
+                if self.chat.canal.is_some() {
                     self.controle(
                         serde_json::json!({"subtype": "set_permission_mode", "mode": m.id()}),
                     );
                 }
             }
             Msg::Agente(agente::Evento::Pronto(canal)) => {
-                for linha in self.fila.drain(..) {
+                for linha in self.chat.fila.drain(..) {
                     let _ = canal.send(linha);
                 }
-                self.canal = Some(canal);
+                self.chat.canal = Some(canal);
             }
             Msg::Agente(agente::Evento::Mensagem(v)) => {
                 for s in agente::interpretar(&v) {
@@ -875,11 +922,10 @@ impl Code {
                 }
             }
             Msg::Agente(agente::Evento::Encerrado(motivo)) => {
-                self.itens.extend(motivo.map(Item::Aviso));
-                self.ligado = false;
-                self.canal = None;
-                self.ocupado = false;
-                self.conversa += 1;
+                self.chat.itens.extend(motivo.map(Item::Aviso));
+                self.chat.ligado = false;
+                self.chat.canal = None;
+                self.chat.ocupado = false;
             }
             Msg::Responder(i, r) => {
                 let Some(Item::Pedido {
@@ -888,7 +934,7 @@ impl Code {
                     sugestoes,
                     resposta,
                     ..
-                }) = self.itens.get_mut(i)
+                }) = self.chat.itens.get_mut(i)
                 else {
                     return Task::none();
                 };
@@ -1074,7 +1120,8 @@ impl Code {
                 Some(d) => self.diff_view(d),
                 None => self.editor_view(),
             }
-        ].width(Length::Fill);
+        ]
+        .width(Length::Fill);
         if self.terminal_aberto {
             centro = centro.push(linha_horizontal()).push(self.terminal_view());
         }
@@ -1420,14 +1467,20 @@ impl Code {
                     None => "alterações desde o último commit".into(),
                 })
                 .size(12)
-                    .color(COR_TEXTO_MUTED()),
+                .color(COR_TEXTO_MUTED()),
                 text(format!("+{mais}")).size(12).font(MONO).color(VERDE),
-                text(format!("−{menos}")).size(12).font(MONO).color(COR_ERRO()),
+                text(format!("−{menos}"))
+                    .size(12)
+                    .font(MONO)
+                    .color(COR_ERRO()),
                 horizontal_space(),
                 botao_texto(
-                    row![icone_traco("file-code", 14.0), text("Abrir arquivo").size(12)]
-                        .spacing(6)
-                        .align_y(Alignment::Center),
+                    row![
+                        icone_traco("file-code", 14.0),
+                        text("Abrir arquivo").size(12)
+                    ]
+                    .spacing(6)
+                    .align_y(Alignment::Center),
                     Msg::AbrirArquivo(d.caminho.clone()),
                 ),
                 botao_icone("x", Msg::FecharDiff),
@@ -1458,11 +1511,15 @@ impl Code {
                 _ => (Color::TRANSPARENT, "", COR_TEXTO_MUTED()),
             };
             let corpo: Element<Msg> = if l.tipo == '@' {
-                text(if l.texto.is_empty() { "⋯".to_string() } else { format!("⋯  {}", l.texto) })
-                    .size(TAMANHO_FONTE - 1.0)
-                    .font(MONO)
-                    .color(COR_TEXTO_MUTED())
-                    .into()
+                text(if l.texto.is_empty() {
+                    "⋯".to_string()
+                } else {
+                    format!("⋯  {}", l.texto)
+                })
+                .size(TAMANHO_FONTE - 1.0)
+                .font(MONO)
+                .color(COR_TEXTO_MUTED())
+                .into()
             } else {
                 text(&l.texto)
                     .size(TAMANHO_FONTE)
@@ -1514,10 +1571,14 @@ impl Code {
                 .style(rolagem_discreta)
                 .into()
         };
-        column![cab, linha_horizontal(), container(corpo).style(|_| fundo(COR_PAINEL()))]
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into()
+        column![
+            cab,
+            linha_horizontal(),
+            container(corpo).style(|_| fundo(COR_PAINEL()))
+        ]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
     }
 
     /// Os agentes que dá para escolher: o Claude Code sempre (é o padrão), os outros se instalados.
@@ -1526,14 +1587,18 @@ impl Code {
             .into_iter()
             .filter(|p| {
                 *p == agente::Provedor::Claude
-                    || *p == self.provedor
-                    || self.ini.outros.iter().any(|(nome, _)| *nome == p.to_string())
+                    || *p == self.chat.provedor
+                    || self
+                        .ini
+                        .outros
+                        .iter()
+                        .any(|(nome, _)| *nome == p.to_string())
             })
             .collect()
     }
 
     fn explicacao_agente(&self) -> String {
-        match self.provedor {
+        match self.chat.provedor {
             agente::Provedor::Claude => "O Claude Code roda na pasta aberta, com a sua conta. Antes de gravar um arquivo ou rodar um comando, ele pede permissão aqui.".into(),
             agente::Provedor::Codex => "O Codex roda na pasta aberta, com a sua conta da OpenAI. No modo \"Perguntar antes\", ele pede permissão aqui antes de gravar ou rodar comandos.".into(),
             agente::Provedor::Antigravity => {
@@ -1549,6 +1614,7 @@ impl Code {
 
     fn agente_view(&self) -> Element<'_, Msg> {
         let titulo = self
+            .chat
             .itens
             .iter()
             .find_map(|i| {
@@ -1564,7 +1630,7 @@ impl Code {
                 text(titulo).size(13).font(NEGRITO),
                 horizontal_space(),
                 // O histórico lê as sessões gravadas pelo Claude Code; os outros guardam do jeito deles.
-                if self.provedor == agente::Provedor::Claude {
+                if self.chat.provedor == agente::Provedor::Claude {
                     botao_icone("history", Msg::Historico)
                 } else {
                     Space::with_width(0).into()
@@ -1585,24 +1651,66 @@ impl Code {
         .align_y(Alignment::Center)
         .style(|_| fundo(COR_CROMO_2()));
 
+        let mut chats: Vec<&Chat> = std::iter::once(&self.chat)
+            .chain(self.outros_chats.iter())
+            .collect();
+        chats.sort_by_key(|c| c.conversa);
+        let mut abas_chat = iced::widget::Row::new().spacing(4);
+        for chat in chats {
+            let pendente = chat.itens.iter().any(|i| {
+                matches!(
+                    i,
+                    Item::Pedido {
+                        resposta: Resposta::Pendente,
+                        ..
+                    }
+                )
+            });
+            let estado = if pendente {
+                "Permissão"
+            } else if chat.ocupado {
+                "Rodando…"
+            } else {
+                "Pronto"
+            };
+            let titulo = chat
+                .itens
+                .iter()
+                .find_map(|i| match i {
+                    Item::Eu(t) => Some(t.chars().take(18).collect::<String>()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| format!("Chat {}", chat.conversa + 1));
+            let ativo = chat.conversa == self.chat.conversa;
+            abas_chat = abas_chat.push(
+                button(text(format!("{titulo} · {estado}")).size(11))
+                    .on_press(Msg::TrocarChat(chat.conversa))
+                    .style(move |_, s| item_lista(ativo, s, 4.0)),
+            );
+        }
+        let abas_chat = scrollable(abas_chat).direction(scrollable::Direction::Horizontal(
+            scrollable::Scrollbar::default(),
+        ));
         let mut corpo = Column::new().spacing(12).padding([14, 14]);
-        if self.detalhes {
+        if self.chat.detalhes {
             corpo = corpo.push(self.detalhes_view());
         }
-        if let Some(lista) = &self.historico {
+        if let Some(lista) = &self.chat.historico {
             corpo = corpo.push(historico_view(lista));
-        } else if self.itens.is_empty() {
+        } else if self.chat.itens.is_empty() {
             corpo = corpo.push(
                 column![
                     text("Peça uma mudança ou pergunte sobre o código.").size(13),
-                    text(self.explicacao_agente()).size(12).color(COR_TEXTO_MUTED()),
+                    text(self.explicacao_agente())
+                        .size(12)
+                        .color(COR_TEXTO_MUTED()),
                 ]
                 .spacing(6),
             );
         }
         // Passos seguidos de ferramenta ficam juntos numa linha do tempo, com o traço à esquerda.
         let mut passos: Vec<Element<Msg>> = Vec::new();
-        for (i, item) in self.itens.iter().enumerate() {
+        for (i, item) in self.chat.itens.iter().enumerate() {
             if let Item::Ferramenta { frase, erro, .. } = item {
                 passos.push(passo(frase, *erro));
                 continue;
@@ -1615,7 +1723,7 @@ impl Code {
         if !passos.is_empty() {
             corpo = corpo.push(linha_do_tempo(passos));
         }
-        if self.ocupado {
+        if self.chat.ocupado {
             corpo = corpo.push(text("Trabalhando…").size(12).color(COR_TEXTO_MUTED()));
         }
 
@@ -1641,7 +1749,7 @@ impl Code {
             }
             None => Space::with_height(0).into(),
         };
-        let acao = if self.ocupado {
+        let acao = if self.chat.ocupado {
             button(container(icone_traco("player-stop", 13.0)).center(22))
                 .on_press(Msg::Parar)
                 .padding(0)
@@ -1654,18 +1762,22 @@ impl Code {
         };
         let rodape = row![
             self.bolinha(),
-            pick_list(self.agentes_instalados(), Some(self.provedor), Msg::Provedor)
-                .text_size(12)
-                .padding([2, 4])
-                .style(lista_sem_borda)
-                .menu_style(tema::estilo_menu_popup),
-            pick_list(Modo::TODOS, Some(self.modo), Msg::Modo)
+            pick_list(
+                self.agentes_instalados(),
+                Some(self.chat.provedor),
+                Msg::Provedor
+            )
+            .text_size(12)
+            .padding([2, 4])
+            .style(lista_sem_borda)
+            .menu_style(tema::estilo_menu_popup),
+            pick_list(Modo::TODOS, Some(self.chat.modo), Msg::Modo)
                 .text_size(12)
                 .padding([2, 4])
                 .style(lista_sem_borda)
                 .menu_style(tema::estilo_menu_popup),
             horizontal_space(),
-            text(nome_modelo(&self.info.modelo))
+            text(nome_modelo(&self.chat.info.modelo))
                 .size(12)
                 .color(COR_TEXTO_MUTED()),
             self.anel(),
@@ -1680,7 +1792,7 @@ impl Code {
                 bottom: 0.0,
                 left: 10.0
             }),
-            text_input("Peça uma mudança ou pergunte…", &self.pedido)
+            text_input("Peça uma mudança ou pergunte…", &self.chat.pedido)
                 .on_input(Msg::Pedido)
                 .on_submit(Msg::Enviar)
                 .size(13)
@@ -1700,6 +1812,7 @@ impl Code {
 
         container(column![
             topo,
+            abas_chat,
             linha_horizontal(),
             tema::rolagem(corpo)
                 .style(rolagem_discreta)
@@ -1720,7 +1833,7 @@ impl Code {
 
     /// Estado do agente na bolinha ao lado do nome, com a frase na dica.
     fn estado(&self) -> (Color, &'static str) {
-        let esperando = self.itens.iter().any(|i| {
+        let esperando = self.chat.itens.iter().any(|i| {
             matches!(
                 i,
                 Item::Pedido {
@@ -1729,8 +1842,8 @@ impl Code {
                 }
             )
         });
-        match (self.ligado, self.ocupado) {
-            (false, _) if matches!(self.itens.last(), Some(Item::Aviso(_))) => {
+        match (self.chat.ligado, self.chat.ocupado) {
+            (false, _) if matches!(self.chat.itens.last(), Some(Item::Aviso(_))) => {
                 (COR_ERRO(), "Parou com erro")
             }
             (false, _) => (COR_TEXTO_MUTED(), "Desligado: abre na primeira mensagem"),
@@ -1754,14 +1867,14 @@ impl Code {
 
     /// Anel do contexto usado, como no app do Claude; a dica mostra contexto, sessão e semana.
     fn anel(&self) -> Element<'_, Msg> {
-        let (usados, janela) = self.contexto;
+        let (usados, janela) = self.chat.contexto;
         let fracao = if janela > 0 {
             usados as f32 / janela as f32
         } else {
             0.0
         };
         let desenho = iced::widget::canvas(Anel(fracao)).width(16).height(16);
-        let dica: Element<Msg> = if usados == 0 && self.uso.0.is_none() {
+        let dica: Element<Msg> = if usados == 0 && self.chat.uso.0.is_none() {
             text("O uso aparece depois da primeira resposta.")
                 .size(11)
                 .into()
@@ -1778,7 +1891,7 @@ impl Code {
 
     fn barras_view(&self) -> Element<'_, Msg> {
         let mut c = Column::new().spacing(8);
-        let (usados, janela) = self.contexto;
+        let (usados, janela) = self.chat.contexto;
         if usados > 0 {
             let fracao = if janela > 0 {
                 usados as f32 / janela as f32
@@ -1792,29 +1905,27 @@ impl Code {
             };
             c = c.push(barra("Contexto", fracao, valor));
         }
-        if let Some(u) = self.uso.0 {
+        if let Some(u) = self.chat.uso.0 {
             c = c.push(barra("Sessão (5 h)", u, format!("{:.0}%", u * 100.0)));
         }
-        if let Some(u) = self.uso.1 {
+        if let Some(u) = self.chat.uso.1 {
             c = c.push(barra("Semana (7 dias)", u, format!("{:.0}%", u * 100.0)));
         }
         c.into()
     }
 
     fn detalhes_view(&self) -> Element<'_, Msg> {
-        let i = &self.info;
+        let i = &self.chat.info;
         let rotulo = |t: &'static str| text(t).size(11).font(NEGRITO).color(COR_TEXTO_MUTED());
         let mut c = Column::new().spacing(10).push(self.barras_view());
         if i.versao.is_empty() {
             c = c.push(
-                text(
-                    "Os detalhes aparecem depois da primeira mensagem, quando o agente abre.",
-                )
-                .size(12)
-                .color(COR_TEXTO_MUTED()),
+                text("Os detalhes aparecem depois da primeira mensagem, quando o agente abre.")
+                    .size(12)
+                    .color(COR_TEXTO_MUTED()),
             );
         } else {
-            let quem = match self.provedor {
+            let quem = match self.chat.provedor {
                 agente::Provedor::Claude => format!("Claude Code {}", i.versao),
                 _ => i.versao.clone(),
             };
@@ -2527,6 +2638,35 @@ fn rolagem_discreta(t: &iced::Theme, s: scrollable::Status) -> scrollable::Style
 
 #[cfg(test)]
 mod testes {
+    #[test]
+    fn chats_recebem_eventos_sem_perder_a_aba_ativa() {
+        use super::*;
+        let (mut code, _) = Code::novo(config::Config::ler());
+        code.chat.pedido = "rascunho do primeiro".into();
+        code.chat.ocupado = true;
+        code.chat.ligado = true;
+        let primeiro = code.chat.conversa;
+        let _ = code.update(Msg::NovaConversa);
+        let segundo = code.chat.conversa;
+        code.chat.pedido = "rascunho do segundo".into();
+        assert_ne!(primeiro, segundo);
+        assert!(code.outros_chats[0].ligado);
+        let (canal, mut receptor) = tokio::sync::mpsc::unbounded_channel();
+        let _ = code.update(Msg::EventoChat(primeiro, agente::Evento::Pronto(canal)));
+        assert_eq!(code.chat.conversa, segundo);
+        assert!(code.chat.canal.is_none());
+        let _ = code.update(Msg::TrocarChat(primeiro));
+        assert_eq!(code.chat.pedido, "rascunho do primeiro");
+        code.enviar("mensagem do primeiro".into());
+        assert_eq!(receptor.try_recv().unwrap(), "mensagem do primeiro");
+        let _ = code.update(Msg::TrocarChat(segundo));
+        let _ = code.update(Msg::EventoChat(primeiro, agente::Evento::Encerrado(None)));
+        assert_eq!(code.chat.conversa, segundo);
+        assert_eq!(code.chat.pedido, "rascunho do segundo");
+        assert!(!code.outros_chats[0].ocupado);
+        assert!(!code.outros_chats[0].ligado);
+    }
+
     #[test]
     fn nome_curto_do_modelo() {
         assert_eq!(super::nome_modelo("claude-opus-5-5[1m]"), "Opus 5.5");

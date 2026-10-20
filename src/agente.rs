@@ -147,7 +147,10 @@ fn processo(
         let mut pendentes = adaptador.abrir();
         'laco: loop {
             for m in pendentes.drain(..) {
-                if entrada.write_all(format!("{m}\n").as_bytes()).await.is_err()
+                if entrada
+                    .write_all(format!("{m}\n").as_bytes())
+                    .await
+                    .is_err()
                     || entrada.flush().await.is_err()
                 {
                     break 'laco;
@@ -177,7 +180,10 @@ fn processo(
         let texto = erros.await.unwrap_or_default();
         let motivo = match status {
             Ok(s) if s.success() => None,
-            Ok(s) => Some(format!("O {programa} terminou com erro ({s}). {}", texto.trim())),
+            Ok(s) => Some(format!(
+                "O {programa} terminou com erro ({s}). {}",
+                texto.trim()
+            )),
             Err(e) => Some(e.to_string()),
         };
         let _ = saida.send(Evento::Encerrado(motivo)).await;

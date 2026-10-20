@@ -118,7 +118,12 @@ impl Codex {
                             Some("delete") => "-",
                             _ => return Some(d.to_string()),
                         };
-                        Some(d.lines().map(|l| format!("{sinal}{l}")).collect::<Vec<_>>().join("\n"))
+                        Some(
+                            d.lines()
+                                .map(|l| format!("{sinal}{l}"))
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                        )
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
@@ -188,7 +193,9 @@ impl Adaptador for Codex {
             }
             if let Some(erro) = v["error"]["message"].as_str() {
                 return (
-                    vec![json!({"type": "result", "is_error": true, "result": format!("Codex: {erro}")})],
+                    vec![
+                        json!({"type": "result", "is_error": true, "result": format!("Codex: {erro}")}),
+                    ],
                     Vec::new(),
                 );
             }
@@ -206,15 +213,19 @@ impl Adaptador for Codex {
                     .as_u64()
                     .or(self.janela);
                 let ultimo = &p["tokenUsage"]["last"];
-                vec![json!({"type": "assistant", "message": {"content": [], "usage": {"input_tokens": ultimo["inputTokens"]}}})]
+                vec![
+                    json!({"type": "assistant", "message": {"content": [], "usage": {"input_tokens": ultimo["inputTokens"]}}}),
+                ]
             }
             "account/rateLimits/updated" => {
                 let l = &p["rateLimits"];
                 let uso = |j: &str| l[j]["usedPercent"].as_f64().map(|u| u / 100.0);
-                vec![json!({"type": "rate_limit_event", "rate_limit_info": {"unifiedWindows": {
-                    "five_hour": {"utilization": uso("primary")},
-                    "seven_day": {"utilization": uso("secondary")},
-                }}})]
+                vec![
+                    json!({"type": "rate_limit_event", "rate_limit_info": {"unifiedWindows": {
+                        "five_hour": {"utilization": uso("primary")},
+                        "seven_day": {"utilization": uso("secondary")},
+                    }}}),
+                ]
             }
             "turn/completed" => {
                 self.turno = None;
@@ -287,9 +298,14 @@ pub struct Antigravity {
 
 impl Antigravity {
     pub fn argumentos(modo: &str) -> Vec<String> {
-        let mut a: Vec<String> = ["--output-format", "stream-json", "--input-format", "stream-json"]
-            .map(String::from)
-            .into();
+        let mut a: Vec<String> = [
+            "--output-format",
+            "stream-json",
+            "--input-format",
+            "stream-json",
+        ]
+        .map(String::from)
+        .into();
         match modo {
             "acceptEdits" => a.extend(["--mode".into(), "accept-edits".into()]),
             "plan" => a.extend(["--mode".into(), "plan".into()]),
@@ -320,7 +336,9 @@ impl Adaptador for Antigravity {
     fn de_fora(&mut self, v: Value) -> (Vec<Value>, Vec<String>) {
         let painel = match v["event"].as_str() {
             Some("init") => {
-                vec![json!({"type": "system", "subtype": "init", "model": "", "claude_code_version": "Antigravity"})]
+                vec![
+                    json!({"type": "system", "subtype": "init", "model": "", "claude_code_version": "Antigravity"}),
+                ]
             }
             Some("step_update") => {
                 let u = &v["step_update"];
@@ -382,7 +400,9 @@ impl Adaptador for Antigravity {
 
     fn de_dentro(&mut self, v: Value) -> Vec<String> {
         texto_do_usuario(&v)
-            .map(|t| json!({"event": "user", "message": {"role": "user", "content": t}}).to_string())
+            .map(|t| {
+                json!({"event": "user", "message": {"role": "user", "content": t}}).to_string()
+            })
             .into_iter()
             .collect()
     }
@@ -398,8 +418,11 @@ mod testes {
         let (_, r) = c.de_fora(json!({"id": 1, "result": {}}));
         assert!(r[1].contains("thread/start") && r[1].contains("untrusted"));
         // Pedido antes de a thread existir fica na fila e sai junto com ela.
-        assert!(c.de_dentro(json!({"type": "user", "message": {"content": "oi"}})).is_empty());
-        let (painel, r) = c.de_fora(json!({"id": 11, "result": {"thread": {"id": "t1"}, "model": "gpt-5"}}));
+        assert!(c
+            .de_dentro(json!({"type": "user", "message": {"content": "oi"}}))
+            .is_empty());
+        let (painel, r) =
+            c.de_fora(json!({"id": 11, "result": {"thread": {"id": "t1"}, "model": "gpt-5"}}));
         assert_eq!(painel[0]["subtype"], "init");
         assert!(r[0].contains("turn/start") && r[0].contains("\"oi\""));
         let (painel, _) = c.de_fora(json!({"method": "item/completed", "params": {"item": {"type": "agentMessage", "id": "m", "text": "olá"}}}));
@@ -423,9 +446,15 @@ mod testes {
         let (p, _) = a.de_fora(json!({"event": "step_update", "step_update": {"step_index": 2, "state": "ACTIVE", "step_type": "tool", "tool_name": "run_command", "tool_info": {"parameters": {"CommandLine": "ls"}}}}));
         assert_eq!(p[0]["message"]["content"][0]["name"], "Bash");
         let (p, _) = a.de_fora(json!({"event": "result", "result": {"status": "SUCCESS", "denied_actions": [{"display_name": "WriteToFile"}]}}));
-        assert!(p[0]["message"]["content"][0]["text"].as_str().unwrap().contains("WriteToFile"));
+        assert!(p[0]["message"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("WriteToFile"));
         assert_eq!(p[1]["type"], "result");
-        assert_eq!(Antigravity::argumentos("acceptEdits").last().unwrap(), "-p=");
+        assert_eq!(
+            Antigravity::argumentos("acceptEdits").last().unwrap(),
+            "-p="
+        );
     }
 }
 
@@ -447,7 +476,11 @@ mod de_verdade {
         let pasta = std::path::PathBuf::from(std::env::var("HOME").unwrap())
             .join(format!("feathercode-agente-{}", std::process::id()));
         std::fs::create_dir_all(&pasta).unwrap();
-        let modo = if provedor == Provedor::Antigravity { "acceptEdits" } else { "default" };
+        let modo = if provedor == Provedor::Antigravity {
+            "acceptEdits"
+        } else {
+            "default"
+        };
         let mut s = Box::pin(agente::conversa(provedor, pasta.clone(), modo, None));
         let mut canal = None;
         let mut pediu = false;
@@ -457,7 +490,10 @@ mod de_verdade {
         {
             match ev {
                 Evento::Pronto(c) => {
-                    c.send(agente::mensagem_usuario("Crie o arquivo oi.txt com o texto oi e responda pronto.")).unwrap();
+                    c.send(agente::mensagem_usuario(
+                        "Crie o arquivo oi.txt com o texto oi e responda pronto.",
+                    ))
+                    .unwrap();
                     canal = Some(c);
                 }
                 Evento::Mensagem(v) => {
@@ -465,7 +501,11 @@ mod de_verdade {
                     if v["type"] == "control_request" {
                         pediu = true;
                         let id = v["request_id"].as_str().unwrap();
-                        canal.as_ref().unwrap().send(agente::permitir(id, &v["request"]["input"], None)).unwrap();
+                        canal
+                            .as_ref()
+                            .unwrap()
+                            .send(agente::permitir(id, &v["request"]["input"], None))
+                            .unwrap();
                     }
                     if v["type"] == "result" {
                         break;

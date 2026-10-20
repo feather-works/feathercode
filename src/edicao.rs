@@ -272,7 +272,11 @@ mod testes {
         assert!(d.desfazer(&mut c));
         assert_eq!(texto_exato(&c), "abcd");
         assert!(d.desfazer(&mut c));
-        assert_eq!(texto_exato(&c), "ab", "as duas letras seguidas são um passo só");
+        assert_eq!(
+            texto_exato(&c),
+            "ab",
+            "as duas letras seguidas são um passo só"
+        );
         assert!(!d.desfazer(&mut c));
         assert!(d.refazer(&mut c));
         assert_eq!(texto_exato(&c), "abcd");

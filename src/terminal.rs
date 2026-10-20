@@ -171,7 +171,9 @@ impl Code {
         .align_y(Alignment::Center)
         .style(|_| fundo(COR_CROMO_2()));
         let corpo: Element<Msg> = match t.ativo() {
-            Some(termo) => iced_term::TerminalView::show(termo).map(Msg::Term),
+            Some(termo) => {
+                foco_por_clique(iced_term::TerminalView::show(termo).map(Msg::Term)).into()
+            }
             None => container(
                 button(text("Abrir um terminal").size(12).color(COR_AZUL_ACENTO()))
                     .on_press(Msg::NovoTerminal)
@@ -190,5 +192,169 @@ impl Code {
         ]
         .height(ALTURA_TERMINAL)
         .into()
+    }
+}
+
+/// O `TerminalView` nasce com o foco e só o perde por uma operação de foco; clicar no chat não
+/// tira, e o que se digitava lá ia parar no shell também. Este invólucro decide a cada clique:
+/// clique no terminal liga o foco dele, clique em qualquer outro lugar desliga.
+pub struct FocoPorClique<'a, M> {
+    conteudo: Element<'a, M>,
+}
+
+pub fn foco_por_clique<'a, M>(conteudo: impl Into<Element<'a, M>>) -> FocoPorClique<'a, M> {
+    FocoPorClique {
+        conteudo: conteudo.into(),
+    }
+}
+
+/// Liga ou desliga o foco de tudo o que for focável dentro do terminal.
+struct Foco(bool);
+
+impl<T> iced::advanced::widget::Operation<T> for Foco {
+    fn container(
+        &mut self,
+        _id: Option<&iced::advanced::widget::Id>,
+        _bounds: iced::Rectangle,
+        operate_on_children: &mut dyn FnMut(&mut dyn iced::advanced::widget::Operation<T>),
+    ) {
+        operate_on_children(self);
+    }
+
+    fn focusable(
+        &mut self,
+        state: &mut dyn iced::advanced::widget::operation::Focusable,
+        _id: Option<&iced::advanced::widget::Id>,
+    ) {
+        if self.0 {
+            state.focus();
+        } else {
+            state.unfocus();
+        }
+    }
+}
+
+impl<M> iced::advanced::Widget<M, iced::Theme, iced::Renderer> for FocoPorClique<'_, M> {
+    fn children(&self) -> Vec<iced::advanced::widget::Tree> {
+        vec![iced::advanced::widget::Tree::new(&self.conteudo)]
+    }
+
+    fn diff(&self, tree: &mut iced::advanced::widget::Tree) {
+        tree.diff_children(std::slice::from_ref(&self.conteudo));
+    }
+
+    fn size(&self) -> iced::Size<Length> {
+        self.conteudo.as_widget().size()
+    }
+
+    fn layout(
+        &self,
+        tree: &mut iced::advanced::widget::Tree,
+        renderer: &iced::Renderer,
+        limites: &iced::advanced::layout::Limits,
+    ) -> iced::advanced::layout::Node {
+        self.conteudo
+            .as_widget()
+            .layout(&mut tree.children[0], renderer, limites)
+    }
+
+    fn draw(
+        &self,
+        tree: &iced::advanced::widget::Tree,
+        renderer: &mut iced::Renderer,
+        tema: &iced::Theme,
+        estilo: &iced::advanced::renderer::Style,
+        layout: iced::advanced::Layout<'_>,
+        cursor: iced::mouse::Cursor,
+        viewport: &iced::Rectangle,
+    ) {
+        self.conteudo.as_widget().draw(
+            &tree.children[0],
+            renderer,
+            tema,
+            estilo,
+            layout,
+            cursor,
+            viewport,
+        );
+    }
+
+    fn operate(
+        &self,
+        tree: &mut iced::advanced::widget::Tree,
+        layout: iced::advanced::Layout<'_>,
+        renderer: &iced::Renderer,
+        operation: &mut dyn iced::advanced::widget::Operation,
+    ) {
+        self.conteudo
+            .as_widget()
+            .operate(&mut tree.children[0], layout, renderer, operation);
+    }
+
+    fn on_event(
+        &mut self,
+        tree: &mut iced::advanced::widget::Tree,
+        event: iced::Event,
+        layout: iced::advanced::Layout<'_>,
+        cursor: iced::mouse::Cursor,
+        renderer: &iced::Renderer,
+        clipboard: &mut dyn iced::advanced::Clipboard,
+        shell: &mut iced::advanced::Shell<'_, M>,
+        viewport: &iced::Rectangle,
+    ) -> iced::event::Status {
+        if let iced::Event::Mouse(iced::mouse::Event::ButtonPressed(_)) = event {
+            let dentro = cursor.is_over(layout.bounds());
+            self.conteudo.as_widget().operate(
+                &mut tree.children[0],
+                layout,
+                renderer,
+                &mut Foco(dentro),
+            );
+        }
+        self.conteudo.as_widget_mut().on_event(
+            &mut tree.children[0],
+            event,
+            layout,
+            cursor,
+            renderer,
+            clipboard,
+            shell,
+            viewport,
+        )
+    }
+
+    fn mouse_interaction(
+        &self,
+        tree: &iced::advanced::widget::Tree,
+        layout: iced::advanced::Layout<'_>,
+        cursor: iced::mouse::Cursor,
+        viewport: &iced::Rectangle,
+        renderer: &iced::Renderer,
+    ) -> iced::mouse::Interaction {
+        self.conteudo.as_widget().mouse_interaction(
+            &tree.children[0],
+            layout,
+            cursor,
+            viewport,
+            renderer,
+        )
+    }
+
+    fn overlay<'b>(
+        &'b mut self,
+        tree: &'b mut iced::advanced::widget::Tree,
+        layout: iced::advanced::Layout<'_>,
+        renderer: &iced::Renderer,
+        translation: iced::Vector,
+    ) -> Option<iced::advanced::overlay::Element<'b, M, iced::Theme, iced::Renderer>> {
+        self.conteudo
+            .as_widget_mut()
+            .overlay(&mut tree.children[0], layout, renderer, translation)
+    }
+}
+
+impl<'a, M: 'a> From<FocoPorClique<'a, M>> for Element<'a, M> {
+    fn from(w: FocoPorClique<'a, M>) -> Self {
+        Element::new(w)
     }
 }
