@@ -109,7 +109,8 @@ pub enum Resposta {
 #[derive(Debug, Clone)]
 pub enum Item {
     Eu(String),
-    Texto(String),
+    /// Resposta do agente já lida como Markdown.
+    Texto(Vec<iced::widget::markdown::Item>),
     Ferramenta { id: String, frase: String, erro: bool },
     Pedido { request_id: String, frase: String, previa: Vec<(char, String)>, input: Value, sugestoes: Value, resposta: Resposta },
     Aviso(String),
@@ -133,7 +134,7 @@ pub fn interpretar(v: &Value) -> Vec<Sinal> {
         Some("assistant") => conteudo()
             .iter()
             .filter_map(|c| match c["type"].as_str() {
-                Some("text") => c["text"].as_str().filter(|t| !t.trim().is_empty()).map(|t| Sinal::Item(Item::Texto(t.trim().into()))),
+                Some("text") => c["text"].as_str().filter(|t| !t.trim().is_empty()).map(|t| Sinal::Item(Item::Texto(iced::widget::markdown::parse(t.trim()).collect()))),
                 Some("tool_use") => Some(Sinal::Item(Item::Ferramenta {
                     id: c["id"].as_str().unwrap_or_default().into(),
                     frase: frase(c["name"].as_str().unwrap_or("?"), &c["input"]),
@@ -183,9 +184,9 @@ fn frase(nome: &str, input: &Value) -> String {
         "Read" => format!("Leu {}", nome_curto(s("file_path"))),
         "Write" => format!("Gravar {}", nome_curto(s("file_path"))),
         "Edit" | "MultiEdit" => format!("Editar {}", nome_curto(s("file_path"))),
-        "Bash" => format!("Rodar `{}`", s("command").lines().next().unwrap_or_default()),
-        "Grep" => format!("Buscou `{}`", s("pattern")),
-        "Glob" => format!("Procurou arquivos `{}`", s("pattern")),
+        "Bash" => format!("Rodar {}", s("command").lines().next().unwrap_or_default()),
+        "Grep" => format!("Buscou {}", s("pattern")),
+        "Glob" => format!("Procurou arquivos {}", s("pattern")),
         "WebFetch" => format!("Abrir {}", s("url")),
         "WebSearch" => format!("Pesquisou \"{}\"", s("query")),
         "TodoWrite" => "Atualizou a lista de tarefas".into(),
@@ -216,6 +217,19 @@ fn previa(nome: &str, input: &Value) -> Vec<(char, String)> {
         v.push((' ', format!("… mais {resto} linha(s)")));
     }
     v
+}
+
+/// Conversa de exemplo para o modo de captura (fotos da tela sem gastar a conta).
+pub fn exemplo() -> Vec<Item> {
+    let ferramenta = |id: &str, nome, input: Value| Item::Ferramenta { id: id.into(), frase: frase(nome, &input), erro: false };
+    let edicao = json!({"file_path": "src/arvore.rs", "old_string": "const IGNORADAS: [&str; 4] = [\".git\", \"target\", \"node_modules\", \".~lock\"];", "new_string": "const IGNORADAS: [&str; 5] = [\".git\", \"target\", \"node_modules\", \".~lock\", \"dist\"];"});
+    vec![
+        Item::Eu("Esconde a pasta dist da árvore também".into()),
+        ferramenta("1", "Read", json!({"file_path": "src/arvore.rs"})),
+        ferramenta("2", "Grep", json!({"pattern": "IGNORADAS"})),
+        Item::Texto(iced::widget::markdown::parse("A lista fica em `IGNORADAS`, no começo de `arvore.rs`. Acrescentei `\"dist\"`.").collect()),
+        Item::Pedido { request_id: "x".into(), frase: frase("Edit", &edicao), previa: previa("Edit", &edicao), input: edicao, sugestoes: Value::Null, resposta: Resposta::Pendente },
+    ]
 }
 
 #[cfg(test)]

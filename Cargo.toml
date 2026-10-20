@@ -10,11 +10,13 @@ publish = false
 
 [dependencies]
 feather-ui = { git = "https://github.com/feather-works/feather-ui", tag = "v0.2.10" }
-iced = { version = "0.13", features = ["svg", "tokio", "highlighter", "auto-detect-theme"] }
+iced = { version = "0.13", features = ["svg", "tokio", "highlighter", "markdown", "auto-detect-theme"] }
 # Mesma escolha do FeatherSheet: diálogo nativo pelo portal, sem GTK.
 rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
 serde_json = "1"
-tokio = { version = "1", features = ["process", "io-util", "macros", "sync", "rt"] }
+# Só o modo de captura (FEATHERCODE_CAPTURAR) grava PNG.
+image = { version = "0.25", default-features = false, features = ["png"] }
+tokio = { version = "1", features = ["process", "io-util", "macros", "sync", "rt", "time"] }
 
 [profile.release]
 lto = "thin"
