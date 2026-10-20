@@ -421,13 +421,9 @@ impl Code {
                 v
             }
             2 => vec![
-                if self.rodando {
-                    ("Parar", "", Msg::PararComando, false)
-                } else {
-                    ("Rodar projeto", "F5", Msg::RodarProjeto, false)
-                },
+                ("Rodar projeto", "F5", Msg::RodarProjeto, false),
+                ("Novo terminal", "", Msg::NovoTerminal, false),
                 ("Ir para o terminal", "", Msg::FocarTerminal, false),
-                ("Limpar saída", "", Msg::LimparTerminal, false),
             ],
             _ => {
                 let mut v = vec![("Nova conversa", "", Msg::NovaConversa, false)];

@@ -7,6 +7,7 @@ mod execucao;
 mod inicio;
 mod modelos;
 mod paineis;
+mod terminal;
 
 use agente::{Item, Resposta, Sinal};
 use feather_ui::cromo;
@@ -139,12 +140,12 @@ enum Msg {
     Modo(Modo),
     Agente(agente::Evento),
     Responder(usize, Resposta),
-    Comando(String),
-    Rodar,
     FocarTerminal,
-    Saida(execucao::Saida),
     RodarProjeto,
-    PararComando,
+    Term(iced_term::Event),
+    NovoTerminal,
+    FecharTerminal(u64),
+    TrocarTerminal(usize),
     Janela(Option<window::Id>),
     Tamanho(Size),
     Capturar,
@@ -160,7 +161,6 @@ enum Msg {
     Lado(Lado),
     AlternarAgente,
     AlternarTerminal,
-    LimparTerminal,
     Busca(String),
     BuscarAgora,
     Achados(Vec<paineis::Achado>),
@@ -199,11 +199,7 @@ struct Code {
     contexto: (u64, u64),
     detalhes: bool,
     proximo_controle: u64,
-    comando: String,
-    saida: String,
-    rodando: bool,
-    /// Mata o comando que está rodando.
-    parar: Option<tokio::sync::oneshot::Sender<()>>,
+    terminais: terminal::Terminais,
     aviso: String,
     ramo: Option<String>,
     tamanho: Size,
@@ -258,10 +254,7 @@ impl Code {
             contexto: (0, 0),
             detalhes: false,
             proximo_controle: 0,
-            comando: String::new(),
-            saida: String::new(),
-            rodando: false,
-            parar: None,
+            terminais: terminal::Terminais::default(),
             aviso: String::new(),
             ramo: ramo(&pasta),
             tamanho: Size::new(1380.0, 860.0),
@@ -279,6 +272,11 @@ impl Code {
             todos_arquivos: Vec::new(),
         };
         let mut code = code;
+        if !code.inicio {
+            if let Err(e) = code.terminais.novo(&code.arvore.raiz.clone(), None) {
+                code.aviso = e;
+            }
+        }
         // Modo de captura: FEATHERCODE_CAPTURAR=foto.png fotografa a janela e fecha;
         // FEATHERCODE_CAPTURAR_ARQUIVO abre um arquivo e FEATHERCODE_CAPTURAR_EXEMPLO=1 põe uma conversa de exemplo.
         if let Some(arquivo) = std::env::var_os("FEATHERCODE_CAPTURAR_ARQUIVO") {
@@ -293,7 +291,6 @@ impl Code {
         }
         if std::env::var_os("FEATHERCODE_CAPTURAR_EXEMPLO").is_some() {
             code.itens = agente::exemplo();
-            code.saida = "$ cargo test\n   Compiling feathercode v0.1.0\ntest result: ok. 14 passed; 0 failed\n".into();
             code.uso = (Some(0.43), Some(0.63));
         }
         code.atualizar_recentes();
@@ -330,6 +327,7 @@ impl Code {
                 Subscription::run_with_id(("agente", self.conversa), conversa).map(Msg::Agente),
             );
         }
+        subs.push(self.terminais.subscription());
         Subscription::batch(subs)
     }
 
@@ -346,19 +344,10 @@ impl Code {
         self.enviar(linha);
     }
 
-    fn iniciar_comando(&mut self, cmd: String) -> Task<Msg> {
-        if self.rodando {
-            self.aviso = "Já tem um comando rodando no terminal. Pare ele antes.".into();
-            return Task::none();
-        }
-        self.rodando = true;
-        self.saida.push_str(&format!("$ {cmd}\n"));
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        self.parar = Some(tx);
-        Task::run(
-            execucao::executar(cmd, self.arvore.raiz.clone(), rx),
-            Msg::Saida,
-        )
+    fn focar_terminal(&self) -> Task<Msg> {
+        self.terminais.ativo().map_or_else(Task::none, |t| {
+            iced_term::TerminalView::focus(t.widget_id())
+        })
     }
 
     fn tema_codigo(&self) -> highlighter::Theme {
@@ -456,6 +445,11 @@ impl Code {
         }
         self.config.usar_pasta(p.clone());
         self.ramo = ramo(&p);
+        // Os terminais da pasta anterior fecham; um shell novo já abre na pasta nova.
+        self.terminais = terminal::Terminais::default();
+        if let Err(e) = self.terminais.novo(&p, None) {
+            self.aviso = e;
+        }
         self.arvore = arvore::Arvore::nova(p);
         self.abas.clear();
         self.ativa = 0;
@@ -478,7 +472,7 @@ impl Code {
                 | Msg::Capturado(_)
                 | Msg::Agente(_)
                 | Msg::Tamanho(_)
-                | Msg::Saida(_)
+                | Msg::Term(_)
                 | Msg::Git(_)
                 | Msg::Achados(_)
                 | Msg::Ini(inicio::Ini::ClaudeVersao(_) | inicio::Ini::OutrosAgentes(_))
@@ -546,7 +540,6 @@ impl Code {
             }
             Msg::AlternarAgente => self.agente_aberto = !self.agente_aberto,
             Msg::AlternarTerminal => self.terminal_aberto = !self.terminal_aberto,
-            Msg::LimparTerminal => self.saida.clear(),
             Msg::TemaCodigo(i) => {
                 self.config.tema_codigo = Some(i);
                 self.config.gravar();
@@ -750,61 +743,40 @@ impl Code {
                 };
                 self.enviar(linha);
             }
-            Msg::Comando(c) => self.comando = c,
-            Msg::FocarTerminal => return text_input::focus(text_input::Id::new("terminal")),
-            Msg::Rodar => {
-                let cmd = std::mem::take(&mut self.comando);
-                if cmd.trim().is_empty() || self.rodando {
-                    self.comando = cmd;
-                    return Task::none();
+            Msg::FocarTerminal => {
+                self.terminal_aberto = true;
+                if let Some(t) = self.terminais.ativo() {
+                    return iced_term::TerminalView::focus(t.widget_id());
                 }
-                return self.iniciar_comando(cmd);
+                return self.update(Msg::NovoTerminal);
             }
+            Msg::NovoTerminal => {
+                self.terminal_aberto = true;
+                match self.terminais.novo(&self.arvore.raiz, None) {
+                    Ok(_) => return self.focar_terminal(),
+                    Err(e) => self.aviso = e,
+                }
+            }
+            Msg::FecharTerminal(id) => self.terminais.fechar(id),
+            Msg::TrocarTerminal(i) => {
+                self.terminais.ativa = i;
+                return self.focar_terminal();
+            }
+            Msg::Term(ev) => self.terminais.tratar(ev),
             Msg::RodarProjeto => {
                 let arquivo = self.aba().map(|a| a.caminho.clone());
                 match execucao::comando_do_projeto(&self.arvore.raiz, arquivo.as_deref()) {
                     Some(cmd) => {
                         self.terminal_aberto = true;
-                        return self.iniciar_comando(cmd);
+                        match self.terminais.rodar(&self.arvore.raiz, &cmd) {
+                            Ok(_) => return self.focar_terminal(),
+                            Err(e) => self.aviso = e,
+                        }
                     }
                     None => {
                         self.aviso =
                             "Não sei como rodar esta pasta. Digite o comando no terminal.".into()
                     }
-                }
-            }
-            Msg::PararComando => {
-                if let Some(tx) = self.parar.take() {
-                    let _ = tx.send(());
-                }
-            }
-            Msg::Saida(s) => {
-                match s {
-                    execucao::Saida::Linha(l) => {
-                        self.saida.push_str(&l);
-                        self.saida.push('\n');
-                    }
-                    execucao::Saida::Fim(f) => {
-                        if !f.is_empty() {
-                            self.saida.push_str(&f);
-                            self.saida.push('\n');
-                        }
-                        self.rodando = false;
-                        self.parar = None;
-                        self.arvore.recarregar();
-                        self.todos_arquivos.clear();
-                        if !self.filtro.trim().is_empty() {
-                            self.todos_arquivos = paineis::arquivos(&self.arvore.raiz);
-                        }
-                    }
-                }
-                // shortcut: guarda só o fim da saída; um terminal de verdade (PTY) substitui isto.
-                if self.saida.len() > 200_000 {
-                    let mut corte = self.saida.len() - 150_000;
-                    while !self.saida.is_char_boundary(corte) {
-                        corte += 1;
-                    }
-                    self.saida.drain(..corte);
                 }
             }
             Msg::Janela(id) => {
@@ -1138,18 +1110,12 @@ impl Code {
             row![stack![aba, traco], linha_vertical()].into()
         });
         let arquivo = self.aba().map(|a| a.caminho.as_path());
-        let rodar: Element<Msg> = if self.rodando {
-            botao_rodar(
-                "Parar",
-                AMARELO,
-                Msg::PararComando,
-                "Para o comando do terminal".into(),
-            )
-        } else if let Some(cmd) = execucao::comando_do_projeto(&self.arvore.raiz, arquivo) {
-            botao_rodar("Rodar", VERDE, Msg::RodarProjeto, format!("{cmd}  (F5)"))
-        } else {
-            Space::with_width(0).into()
-        };
+        let rodar: Element<Msg> =
+            if let Some(cmd) = execucao::comando_do_projeto(&self.arvore.raiz, arquivo) {
+                botao_rodar("Rodar", VERDE, Msg::RodarProjeto, format!("{cmd}  (F5)"))
+            } else {
+                Space::with_width(0).into()
+            };
         container(
             row![
                 row(abas).height(Length::Fill),
@@ -1272,72 +1238,6 @@ impl Code {
                 .style(rolagem_discreta),
         )
         .style(|_| fundo(COR_PAINEL()))
-        .into()
-    }
-
-    fn terminal_view(&self) -> Element<'_, Msg> {
-        let entrada = text_input(
-            if self.rodando {
-                "Rodando…"
-            } else {
-                "Comando na pasta, ex.: cargo build"
-            },
-            &self.comando,
-        )
-        .id(text_input::Id::new("terminal"))
-        .on_input(Msg::Comando)
-        .on_submit(Msg::Rodar)
-        .font(MONO)
-        .size(12)
-        .padding(0)
-        .style(campo_sem_borda);
-        let saida = tema::rolagem(text(&self.saida).font(MONO).size(12))
-            .style(rolagem_discreta)
-            .anchor_bottom()
-            .height(Length::Fill)
-            .width(Length::Fill);
-        let cabecalho = container(
-            row![
-                text("TERMINAL")
-                    .size(11)
-                    .font(NEGRITO)
-                    .color(COR_TEXTO_MUTED()),
-                text(if self.rodando { "rodando…" } else { "" })
-                    .size(11)
-                    .color(VERDE),
-                horizontal_space(),
-                botao_icone("x", Msg::AlternarTerminal),
-            ]
-            .spacing(10)
-            .align_y(Alignment::Center),
-        )
-        .padding([0, 10])
-        .height(28)
-        .align_y(Alignment::Center)
-        .style(|_| fundo(COR_CROMO_2()));
-        // Clicar em qualquer ponto do terminal põe o cursor na linha de comando.
-        let painel = container(
-            column![
-                saida,
-                row![
-                    text("$").font(MONO).size(12).color(COR_AZUL_ACENTO()),
-                    entrada
-                ]
-                .spacing(8)
-                .align_y(Alignment::Center),
-            ]
-            .spacing(6),
-        )
-        .padding([6, 14])
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .style(|_| fundo(cor_terminal()));
-        column![
-            cabecalho,
-            linha_horizontal(),
-            mouse_area(painel).on_press(Msg::FocarTerminal)
-        ]
-        .height(ALTURA_TERMINAL)
         .into()
     }
 

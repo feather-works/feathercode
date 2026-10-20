@@ -19,6 +19,8 @@ dirs = "6"
 # Só o modo de captura (FEATHERCODE_CAPTURAR) grava PNG.
 image = { version = "0.25", default-features = false, features = ["png"] }
 tokio = { version = "1", features = ["process", "io-util", "macros", "sync", "rt", "time"] }
+# Terminal de verdade (PTY + emulador do Alacritty), na versão que usa o Iced 0.13.
+iced_term = "0.6.0"
 
 [profile.release]
 lto = "thin"
