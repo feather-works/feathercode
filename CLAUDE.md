@@ -95,6 +95,15 @@ Regra que vale para tudo: tela nova é desenhada no artifact primeiro
   extensões nem configurações da pasta). Talvez só uma confirmação antes do Rodar numa pasta
   clonada que nunca foi rodada.
 
+**Menu do botão direito (pedido em 19/10; hoje não existe nenhum)** — mesmo visual do menu
+do topo, só com o que funciona:
+- [ ] Editor: Recortar, Copiar, Colar, Selecionar tudo · Comentar linha · Rodar seleção no
+      terminal · Perguntar ao agente sobre a seleção.
+- [ ] Explorador: Abrir, Ver alterações (se mudou), Copiar caminho / caminho relativo,
+      Renomear, Excluir (com confirmação); na pasta também Novo arquivo, Nova pasta, Abrir no terminal.
+- [ ] Aba: Fechar, Fechar as outras, Fechar todas, Copiar caminho.
+- [ ] Mudança do Git: Abrir arquivo, Ver alterações, Descartar alterações (com confirmação).
+
 **Lançador e cor**
 - [ ] Lançador: página de primeira instalação (rodar em segundo plano?) e redesenho, no artifact.
 - [ ] Cor do FeatherCode: roxo hoje; Petróleo `#2b7a78` proposto, sem decisão.
