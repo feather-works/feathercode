@@ -58,7 +58,7 @@ pub struct Estado {
     clonando: bool,
     /// `None` enquanto confere; `Some(None)` = não achou o `claude`.
     claude: Option<Option<String>>,
-    outros: Vec<(&'static str, String)>,
+    pub outros: Vec<(&'static str, String)>,
     recentes: Vec<LinhaRecente>,
 }
 
@@ -115,7 +115,7 @@ pub fn conferir_claude() -> Task<Msg> {
     ])
 }
 
-/// Agentes que a tela reconhece, mas que o painel ainda não sabe conduzir.
+/// Os outros agentes que o painel sabe conduzir (`adaptadores.rs`), se estiverem instalados.
 const OUTROS_AGENTES: [(&str, &str); 2] = [("Codex", "codex"), ("Antigravity", "agy")];
 
 /// Nome da pasta do clone: o fim do endereço sem `.git`.
@@ -743,10 +743,10 @@ impl Code {
         for (nome, v) in &self.ini.outros {
             col = col.push(
                 row![
-                    text("●").size(10).color(COR_TEXTO_MUTED()),
+                    text("●").size(10).color(VERDE),
                     column![
                         text(format!("{nome} {v}")).size(12).font(NEGRITO),
-                        text("Instalado; o painel ainda não conversa com ele.")
+                        text("Instalado; escolha no rodapé do painel do agente.")
                             .size(11)
                             .color(COR_TEXTO_MUTED())
                     ]

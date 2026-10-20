@@ -48,19 +48,28 @@ Regra que vale para tudo: tela nova é desenhada no artifact primeiro
 - [x] Clicar numa mudança mostra a diferença contra o último commit (em linha, com +/−).
 - [ ] Diferença **lado a lado** (antes | depois, faixa hachurada onde não há linha), como o VS Code;
       a em linha fica como opção.
-- [ ] No Gráfico, clicar num commit abre a lista de arquivos dele; clicar no arquivo mostra a
+- [x] No Gráfico, clicar num commit abre a lista de arquivos dele; clicar no arquivo mostra a
       diferença daquele commit (`git show <hash> -- arquivo`).
 - [ ] Ctrl+Enter faz o commit; botão Commit com seta: "Commit e Push", "Commit (só o preparado)".
 - [ ] Preparar/despreparar arquivo por arquivo (+ / −), como "Staged Changes".
+
+**Editor (feito em 19/10):** Ctrl+Z/Ctrl+Y com pilha própria (`edicao::Desfazer`); linha do
+cursor destacada; trilho no estilo do VS Code; só a pena no topo.
 
 **Explorador**
 - [ ] Ícone por tipo de arquivo (`.py`, `.rs`, `.env`, `.gitignore`, `.md`, `.txt`…).
 - [ ] Botões no topo: novo arquivo, nova pasta, atualizar, recolher tudo.
 
 **Agentes**
-- [ ] Trocar o agente no rodapé do painel ("Claude Code" vira seletor): Codex (app-server
-      JSON-RPC) e Antigravity (`agy` headless stream-json; não pede permissão no modo headless —
-      decidir com o usuário). Hoje só o Claude Code conversa.
+- [x] Trocar o agente no rodapé do painel (seletor com os instalados). `adaptadores.rs` traduz o
+      Codex (`codex app-server`, JSON-RPC; pede permissão) e o Antigravity (`agy` stream-json) para
+      o protocolo do Claude Code, que é o que o painel entende. Teste com a conta de verdade:
+      `FEATHERCODE_AGENTE=codex|agy cargo test --release agente_de_verdade -- --ignored --nocapture`.
+- Limites do Antigravity: sem janela ele não pede permissão (recusa na hora; o painel avisa e
+  sugere "Aceitar edições"); trocar de modo só vale em conversa nova; o snap
+  (`antigravity-cli`, de terceiro) não enxerga `/run/media`, pasta oculta da casa nem o `/tmp`.
+- [ ] Histórico de conversas do Codex (`thread/list` + `thread/resume`) e do Antigravity
+      (`--conversation <id>`); hoje o botão de histórico só aparece com o Claude Code.
 
 **Configurações**
 - [ ] Engrenagem no fim do trilho + Ctrl+, ; padrão da suíte (`feather_ui::configuracoes`,

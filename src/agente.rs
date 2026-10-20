@@ -16,28 +16,109 @@ pub enum Evento {
     Encerrado(Option<String>),
 }
 
-/// Abre o `claude` na pasta e repassa tudo o que ele escreve. Soltar o stream mata o processo.
+/// Os agentes que o painel sabe conduzir. O painel fala o protocolo do Claude Code; os outros
+/// passam por um adaptador (`adaptadores.rs`) que traduz nos dois sentidos.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Provedor {
+    Claude,
+    Codex,
+    Antigravity,
+}
+
+impl Provedor {
+    pub const TODOS: [Provedor; 3] = [Provedor::Claude, Provedor::Codex, Provedor::Antigravity];
+
+    pub fn programa(self) -> &'static str {
+        match self {
+            Provedor::Claude => "claude",
+            Provedor::Codex => "codex",
+            Provedor::Antigravity => "agy",
+        }
+    }
+}
+
+impl std::fmt::Display for Provedor {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str(match self {
+            Provedor::Claude => "Claude Code",
+            Provedor::Codex => "Codex",
+            Provedor::Antigravity => "Antigravity",
+        })
+    }
+}
+
+/// Traduz entre o processo do agente e o painel (que entende as mensagens do Claude Code).
+pub trait Adaptador: Send + 'static {
+    /// Linhas a mandar ao processo assim que ele abre.
+    fn abrir(&mut self) -> Vec<String> {
+        Vec::new()
+    }
+    /// Uma linha JSON do processo: o que vai para o painel e o que volta para o processo.
+    fn de_fora(&mut self, v: Value) -> (Vec<Value>, Vec<String>);
+    /// Uma linha do painel (no formato do Claude Code): o que mandar ao processo.
+    fn de_dentro(&mut self, v: Value) -> Vec<String>;
+}
+
+/// O Claude Code fala o protocolo do painel: nada a traduzir.
+struct Direto;
+
+impl Adaptador for Direto {
+    fn de_fora(&mut self, v: Value) -> (Vec<Value>, Vec<String>) {
+        (vec![v], Vec::new())
+    }
+    fn de_dentro(&mut self, v: Value) -> Vec<String> {
+        vec![v.to_string()]
+    }
+}
+
+/// Abre o agente escolhido na pasta e repassa tudo o que ele escreve. Soltar o stream mata o processo.
 pub fn conversa(
+    provedor: Provedor,
     pasta: PathBuf,
     modo: &'static str,
     retomar: Option<String>,
 ) -> impl Stream<Item = Evento> {
-    iced::stream::channel(64, move |mut saida| async move {
-        let filho = tokio::process::Command::new("claude")
-            .args([
+    let (args, adaptador): (Vec<String>, Box<dyn Adaptador>) = match provedor {
+        Provedor::Claude => {
+            let mut a: Vec<String> = [
                 "--output-format",
                 "stream-json",
                 "--input-format",
                 "stream-json",
                 "--verbose",
-            ])
-            .args([
                 "--permission-prompt-tool",
                 "stdio",
                 "--permission-mode",
                 modo,
-            ])
-            .args(retomar.iter().flat_map(|id| ["--resume", id.as_str()]))
+            ]
+            .map(String::from)
+            .into();
+            if let Some(id) = retomar {
+                a.extend(["--resume".into(), id]);
+            }
+            (a, Box::new(Direto))
+        }
+        Provedor::Codex => (
+            vec!["app-server".into()],
+            Box::new(crate::adaptadores::Codex::novo(&pasta, modo)),
+        ),
+        Provedor::Antigravity => (
+            crate::adaptadores::Antigravity::argumentos(modo),
+            Box::new(crate::adaptadores::Antigravity::default()),
+        ),
+    };
+    processo(provedor.programa(), args, pasta, adaptador)
+}
+
+fn processo(
+    programa: &'static str,
+    args: Vec<String>,
+    pasta: PathBuf,
+    mut adaptador: Box<dyn Adaptador>,
+) -> impl Stream<Item = Evento> {
+    iced::stream::channel(64, move |mut saida| async move {
+        let filho = tokio::process::Command::new(programa)
+            .args(&args)
             .current_dir(&pasta)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -47,7 +128,7 @@ pub fn conversa(
         let mut filho = match filho {
             Ok(f) => f,
             Err(e) => {
-                let motivo = format!("Não consegui abrir o claude ({e}). Instale o Claude Code e confira se o comando `claude` está no PATH.");
+                let motivo = format!("Não consegui abrir o {programa} ({e}). Confira se ele está instalado e no PATH.");
                 let _ = saida.send(Evento::Encerrado(Some(motivo))).await;
                 return;
             }
@@ -63,19 +144,31 @@ pub fn conversa(
         });
         let (tx, mut rx) = mpsc::unbounded_channel::<String>();
         let _ = saida.send(Evento::Pronto(tx)).await;
-        loop {
+        let mut pendentes = adaptador.abrir();
+        'laco: loop {
+            for m in pendentes.drain(..) {
+                if entrada.write_all(format!("{m}\n").as_bytes()).await.is_err()
+                    || entrada.flush().await.is_err()
+                {
+                    break 'laco;
+                }
+            }
             tokio::select! {
                 l = linhas.next_line() => match l {
                     Ok(Some(l)) => {
                         if let Ok(v) = serde_json::from_str(&l) {
-                            let _ = saida.send(Evento::Mensagem(v)).await;
+                            let (para_o_painel, respostas) = adaptador.de_fora(v);
+                            for v in para_o_painel {
+                                let _ = saida.send(Evento::Mensagem(v)).await;
+                            }
+                            pendentes = respostas;
                         }
                     }
                     _ => break,
                 },
                 Some(m) = rx.recv() => {
-                    if entrada.write_all(format!("{m}\n").as_bytes()).await.is_err() || entrada.flush().await.is_err() {
-                        break;
+                    if let Ok(v) = serde_json::from_str(&m) {
+                        pendentes = adaptador.de_dentro(v);
                     }
                 }
             }
@@ -84,10 +177,7 @@ pub fn conversa(
         let texto = erros.await.unwrap_or_default();
         let motivo = match status {
             Ok(s) if s.success() => None,
-            Ok(s) => Some(format!(
-                "O claude terminou com erro ({s}). {}",
-                texto.trim()
-            )),
+            Ok(s) => Some(format!("O {programa} terminou com erro ({s}). {}", texto.trim())),
             Err(e) => Some(e.to_string()),
         };
         let _ = saida.send(Evento::Encerrado(motivo)).await;
@@ -305,7 +395,7 @@ fn frase(nome: &str, input: &Value) -> String {
     match nome {
         "Read" => format!("Leu {}", nome_curto(s("file_path"))),
         "Write" => format!("Gravar {}", nome_curto(s("file_path"))),
-        "Edit" | "MultiEdit" => format!("Editar {}", nome_curto(s("file_path"))),
+        "Edit" | "MultiEdit" | "Diff" => format!("Editar {}", nome_curto(s("file_path"))),
         "Bash" => format!("Rodar {}", s("command").lines().next().unwrap_or_default()),
         "Grep" => format!("Buscou {}", s("pattern")),
         "Glob" => format!("Procurou arquivos {}", s("pattern")),
@@ -345,6 +435,17 @@ fn previa(nome: &str, input: &Value) -> Vec<(char, String)> {
             .collect(),
         "Write" => linhas('+', input["content"].as_str().unwrap_or_default()),
         "Bash" => linhas('$', input["command"].as_str().unwrap_or_default()),
+        // Diferença pronta (Codex): cada linha já traz o seu sinal.
+        "Diff" => input["diff"]
+            .as_str()
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| !l.starts_with("+++") && !l.starts_with("---") && !l.starts_with("@@"))
+            .map(|l| match l.chars().next() {
+                Some(c @ ('+' | '-')) => (c, l[1..].to_string()),
+                _ => (' ', l.get(1..).unwrap_or_default().to_string()),
+            })
+            .collect(),
         _ => Vec::new(),
     };
     if v.len() > LINHAS_PREVIA {

@@ -1,4 +1,5 @@
 //! FeatherCode: editor de código da suíte FeatherWorks, com o Claude Code no painel lateral.
+mod adaptadores;
 mod agente;
 mod arvore;
 mod config;
@@ -117,7 +118,7 @@ impl Modo {
 impl std::fmt::Display for Modo {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         f.write_str(match self {
-            Modo::Perguntar => "Pedir antes de editar",
+            Modo::Perguntar => "Perguntar antes",
             Modo::AceitarEdicoes => "Aceitar edições",
             Modo::Planejar => "Só planejar",
         })
@@ -139,6 +140,7 @@ enum Msg {
     Parar,
     NovaConversa,
     Modo(Modo),
+    Provedor(agente::Provedor),
     Agente(agente::Evento),
     Responder(usize, Resposta),
     FocarTerminal,
@@ -210,6 +212,8 @@ struct Code {
     ocupado: bool,
     pedido: String,
     modo: Modo,
+    /// Agente do painel; trocar começa uma conversa nova.
+    provedor: agente::Provedor,
     uso: (Option<f32>, Option<f32>),
     info: agente::Info,
     /// Tokens no contexto e tamanho da janela do modelo.
@@ -275,6 +279,7 @@ impl Code {
             ocupado: false,
             pedido: String::new(),
             modo: Modo::Perguntar,
+            provedor: agente::Provedor::Claude,
             uso: (None, None),
             info: agente::Info::default(),
             contexto: (0, 0),
@@ -370,6 +375,7 @@ impl Code {
         ];
         if self.ligado {
             let conversa = agente::conversa(
+                self.provedor,
                 self.arvore.raiz.clone(),
                 self.modo.id(),
                 self.retomar.clone(),
@@ -836,8 +842,21 @@ impl Code {
                 self.ocupado = false;
                 self.retomar = Some(id);
             }
+            Msg::Provedor(p) => {
+                if p != self.provedor {
+                    let _ = self.update(Msg::NovaConversa);
+                    self.provedor = p;
+                    self.info = agente::Info::default();
+                    self.uso = (None, None);
+                }
+            }
             Msg::Modo(m) => {
                 self.modo = m;
+                if self.provedor == agente::Provedor::Antigravity && self.canal.is_some() {
+                    self.itens.push(Item::Aviso(
+                        "O Antigravity só troca de modo numa conversa nova (botão +).".into(),
+                    ));
+                }
                 if self.canal.is_some() {
                     self.controle(
                         serde_json::json!({"subtype": "set_permission_mode", "mode": m.id()}),
@@ -1501,6 +1520,33 @@ impl Code {
             .into()
     }
 
+    /// Os agentes que dá para escolher: o Claude Code sempre (é o padrão), os outros se instalados.
+    fn agentes_instalados(&self) -> Vec<agente::Provedor> {
+        agente::Provedor::TODOS
+            .into_iter()
+            .filter(|p| {
+                *p == agente::Provedor::Claude
+                    || *p == self.provedor
+                    || self.ini.outros.iter().any(|(nome, _)| *nome == p.to_string())
+            })
+            .collect()
+    }
+
+    fn explicacao_agente(&self) -> String {
+        match self.provedor {
+            agente::Provedor::Claude => "O Claude Code roda na pasta aberta, com a sua conta. Antes de gravar um arquivo ou rodar um comando, ele pede permissão aqui.".into(),
+            agente::Provedor::Codex => "O Codex roda na pasta aberta, com a sua conta da OpenAI. No modo \"Perguntar antes\", ele pede permissão aqui antes de gravar ou rodar comandos.".into(),
+            agente::Provedor::Antigravity => {
+                let mut t = String::from("O Antigravity roda na pasta aberta, com a sua conta do Google. Por aqui ele não consegue pedir permissão: para gravar arquivos, escolha \"Aceitar edições\" antes de mandar a primeira mensagem.");
+                let raiz = self.arvore.raiz.to_string_lossy();
+                if raiz.starts_with("/run/media/") || raiz.starts_with("/media/") {
+                    t.push_str(" Atenção: o agy instalado pelo snap não enxerga pastas em /run/media; nesta pasta ele não consegue ler os arquivos. Instale o agy sem snap para usar aqui.");
+                }
+                t
+            }
+        }
+    }
+
     fn agente_view(&self) -> Element<'_, Msg> {
         let titulo = self
             .itens
@@ -1517,7 +1563,12 @@ impl Code {
             row![
                 text(titulo).size(13).font(NEGRITO),
                 horizontal_space(),
-                botao_icone("history", Msg::Historico),
+                // O histórico lê as sessões gravadas pelo Claude Code; os outros guardam do jeito deles.
+                if self.provedor == agente::Provedor::Claude {
+                    botao_icone("history", Msg::Historico)
+                } else {
+                    Space::with_width(0).into()
+                },
                 botao_icone("info-circle", Msg::Detalhes),
                 botao_icone("plus", Msg::NovaConversa),
             ]
@@ -1544,7 +1595,7 @@ impl Code {
             corpo = corpo.push(
                 column![
                     text("Peça uma mudança ou pergunte sobre o código.").size(13),
-                    text("O Claude Code roda na pasta aberta, com a sua conta. Antes de gravar um arquivo ou rodar um comando, ele pede permissão aqui.").size(12).color(COR_TEXTO_MUTED()),
+                    text(self.explicacao_agente()).size(12).color(COR_TEXTO_MUTED()),
                 ]
                 .spacing(6),
             );
@@ -1603,7 +1654,11 @@ impl Code {
         };
         let rodape = row![
             self.bolinha(),
-            text("Claude Code").size(12).color(COR_TEXTO_MUTED()),
+            pick_list(self.agentes_instalados(), Some(self.provedor), Msg::Provedor)
+                .text_size(12)
+                .padding([2, 4])
+                .style(lista_sem_borda)
+                .menu_style(tema::estilo_menu_popup),
             pick_list(Modo::TODOS, Some(self.modo), Msg::Modo)
                 .text_size(12)
                 .padding([2, 4])
@@ -1753,13 +1808,17 @@ impl Code {
         if i.versao.is_empty() {
             c = c.push(
                 text(
-                    "Os detalhes aparecem depois da primeira mensagem, quando o Claude Code abre.",
+                    "Os detalhes aparecem depois da primeira mensagem, quando o agente abre.",
                 )
                 .size(12)
                 .color(COR_TEXTO_MUTED()),
             );
         } else {
-            c = c.push(text(format!("{} · Claude Code {}", i.modelo, i.versao)).size(12));
+            let quem = match self.provedor {
+                agente::Provedor::Claude => format!("Claude Code {}", i.versao),
+                _ => i.versao.clone(),
+            };
+            c = c.push(text(format!("{} · {quem}", i.modelo)).size(12));
             let mcp = i.mcp.iter().map(|(nome, estado)| {
                 let (cor, frase) = match estado.as_str() {
                     "connected" => (VERDE, "conectado"),
