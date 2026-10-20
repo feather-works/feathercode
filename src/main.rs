@@ -168,7 +168,7 @@ enum Msg {
     Achados(Vec<paineis::Achado>),
     IrPara(PathBuf, usize),
     GitAtualizar,
-    Git(Result<Vec<(String, PathBuf)>, String>),
+    Git(Result<paineis::EstadoGit, String>),
     Menu(Option<usize>),
     TemaCodigo(usize),
     Filtro(String),
@@ -214,7 +214,7 @@ struct Code {
     busca: String,
     achados: Option<Vec<paineis::Achado>>,
     buscando: bool,
-    git: Option<Result<Vec<(String, PathBuf)>, String>>,
+    git: Option<Result<paineis::EstadoGit, String>>,
     menu: Option<usize>,
     /// Conversa guardada que o próximo `claude` continua (`--resume`).
     retomar: Option<String>,
@@ -307,11 +307,18 @@ impl Code {
             code.info.modelo = "claude-opus-5-5[1m]".into();
         }
         code.atualizar_recentes();
+        // FEATHERCODE_CAPTURAR_GIT=1 abre o painel Git na foto.
+        let git = if std::env::var_os("FEATHERCODE_CAPTURAR_GIT").is_some() {
+            code.update(Msg::Lado(Lado::Git))
+        } else {
+            Task::none()
+        };
         (
             code,
             Task::batch([
                 window::get_latest().map(Msg::Janela),
                 inicio::conferir_claude(),
+                git,
             ]),
         )
     }

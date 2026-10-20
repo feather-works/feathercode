@@ -80,10 +80,91 @@ pub fn buscar(raiz: &Path, termo: &str) -> Vec<Achado> {
 }
 
 /// `git status --porcelain`: (sigla, caminho).
-pub async fn status_git(raiz: PathBuf) -> Result<Vec<(String, PathBuf)>, String> {
+/// Uma linha do `git log --graph`: o desenho dos ramos e, se for commit, os dados dele.
+#[derive(Debug, Clone)]
+pub struct LinhaGrafo {
+    pub grafo: String,
+    pub commit: Option<Commit>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Commit {
+    pub hash: String,
+    pub refs: Vec<String>,
+    pub assunto: String,
+    pub autor: String,
+    pub quando: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct EstadoGit {
+    pub mudancas: Vec<(String, PathBuf)>,
+    pub grafo: Vec<LinhaGrafo>,
+}
+
+/// Separa a saída de `git log --graph --format=%x01%h%x09%D%x09%s%x09%an%x09%ar`.
+fn ler_grafo(saida: &str) -> Vec<LinhaGrafo> {
+    saida
+        .lines()
+        .map(|l| match l.split_once('\u{1}') {
+            Some((grafo, resto)) => {
+                let mut c = resto.split('\t');
+                let mut campo = || c.next().unwrap_or_default().to_string();
+                let hash = campo();
+                let refs = campo();
+                LinhaGrafo {
+                    grafo: grafo.trim_end().to_string(),
+                    commit: Some(Commit {
+                        hash,
+                        refs: refs
+                            .split(", ")
+                            .filter(|r| !r.is_empty())
+                            .map(String::from)
+                            .collect(),
+                        assunto: campo(),
+                        autor: campo(),
+                        quando: campo(),
+                    }),
+                }
+            }
+            None => LinhaGrafo {
+                grafo: l.trim_end().to_string(),
+                commit: None,
+            },
+        })
+        .collect()
+}
+
+/// Mudanças (`git status`) e os últimos commits de todos os ramos com o desenho do grafo.
+pub async fn status_git(raiz: PathBuf) -> Result<EstadoGit, String> {
+    let mudancas = mudancas_git(&raiz).await?;
+    let log = tokio::process::Command::new("git")
+        .args([
+            "log",
+            "--graph",
+            "--all",
+            "-n",
+            "200",
+            "--color=never",
+            "--format=%x01%h%x09%D%x09%s%x09%an%x09%ar",
+        ])
+        .current_dir(&raiz)
+        .output()
+        .await
+        .map_err(|e| format!("Não deu para rodar o git: {e}"))?;
+    // Repositório sem commit ainda: o log falha, e o grafo fica vazio.
+    let grafo = if log.status.success() {
+        ler_grafo(&String::from_utf8_lossy(&log.stdout))
+    } else {
+        Vec::new()
+    };
+    Ok(EstadoGit { mudancas, grafo })
+}
+
+async fn mudancas_git(raiz: &Path) -> Result<Vec<(String, PathBuf)>, String> {
     let saida = tokio::process::Command::new("git")
         .args(["status", "--porcelain=v1", "-uall"])
-        .current_dir(&raiz)
+        .current_dir(raiz)
         .output()
         .await
         .map_err(|e| format!("Não deu para rodar o git: {e}"))?;
@@ -205,6 +286,15 @@ impl Code {
     }
 
     /// O painel ao lado do trilho, conforme o botão escolhido.
+    /// O Git é mais largo: as mensagens dos commits precisam de espaço.
+    pub(crate) fn largura_lado(&self) -> f32 {
+        match self.lado {
+            Some(Lado::Git) => 360.0,
+            Some(_) => LARGURA_ARVORE,
+            None => 0.0,
+        }
+    }
+
     pub(crate) fn lado_view(&self) -> Option<Element<'_, Msg>> {
         let corpo = match self.lado? {
             Lado::Explorador => return Some(self.arvore_view()),
@@ -213,7 +303,7 @@ impl Code {
         };
         Some(
             container(corpo)
-                .width(LARGURA_ARVORE)
+                .width(self.largura_lado())
                 .height(Length::Fill)
                 .style(|_| fundo(COR_PAINEL_FAIXA()))
                 .into(),
@@ -322,45 +412,53 @@ impl Code {
         .color(COR_TEXTO_MUTED());
         let corpo: Element<Msg> = match &self.git {
             None => text("Lendo…").size(12).color(COR_TEXTO_MUTED()).into(),
-            Some(Err(e)) => text(e).size(12).color(COR_ERRO()).into(),
-            Some(Ok(v)) if v.is_empty() => text("Nada mudou desde o último commit.")
-                .size(12)
-                .color(COR_TEXTO_MUTED())
+            Some(Err(e)) => container(text(e).size(12).color(COR_ERRO()))
+                .padding([0, 12])
                 .into(),
-            Some(Ok(v)) => {
-                let linhas = v.iter().map(|(sigla, p)| {
+            Some(Ok(g)) => {
+                let mut c =
+                    Column::new().push(subtitulo_git(format!("Mudanças ({})", g.mudancas.len())));
+                if g.mudancas.is_empty() {
+                    c = c.push(
+                        container(
+                            text("Nada mudou desde o último commit.")
+                                .size(12)
+                                .color(COR_TEXTO_MUTED()),
+                        )
+                        .padding([2, 12]),
+                    );
+                }
+                for (sigla, p) in &g.mudancas {
                     let cor = match sigla.as_str() {
                         "M" | "MM" | "AM" => AMARELO,
                         "D" => COR_ERRO(),
                         _ => VERDE,
                     };
                     let nome = self.relativo(p).display().to_string();
-                    button(
-                        row![
-                            text(nome).size(12).width(Length::Fill),
-                            text(sigla.clone()).font(MONO).size(11).color(cor)
-                        ]
-                        .spacing(6),
-                    )
-                    .on_press(Msg::AbrirArquivo(p.clone()))
-                    .width(Length::Fill)
-                    .padding([3, 12])
-                    .style(|_, s| item_lista(false, s, 0.0))
+                    c = c.push(
+                        button(
+                            row![
+                                text(nome).size(12).width(Length::Fill),
+                                text(sigla.clone()).font(MONO).size(11).color(cor)
+                            ]
+                            .spacing(6),
+                        )
+                        .on_press(Msg::AbrirArquivo(p.clone()))
+                        .width(Length::Fill)
+                        .padding([3, 12])
+                        .style(|_, s| item_lista(false, s, 0.0)),
+                    );
+                }
+                c = c
+                    .push(Space::with_height(10))
+                    .push(subtitulo_git("Gráfico".into()));
+                for l in &g.grafo {
+                    c = c.push(linha_grafo(l));
+                }
+                tema::rolagem(c)
+                    .height(Length::Fill)
+                    .style(rolagem_discreta)
                     .into()
-                });
-                column![
-                    container(
-                        text(format!("Mudanças ({})", v.len()))
-                            .size(11)
-                            .font(NEGRITO)
-                            .color(COR_TEXTO_MUTED())
-                    )
-                    .padding([4, 12]),
-                    tema::rolagem(Column::with_children(linhas))
-                        .height(Length::Fill)
-                        .style(rolagem_discreta)
-                ]
-                .into()
             }
         };
         column![
@@ -568,6 +666,90 @@ impl Code {
     }
 }
 
+fn subtitulo_git(t: String) -> Element<'static, Msg> {
+    container(text(t).size(11).font(NEGRITO).color(COR_TEXTO_MUTED()))
+        .padding([4, 12])
+        .into()
+}
+
+/// Cor de cada ramo pela coluna do desenho, para os ramos se distinguirem.
+fn cor_do_ramo(coluna: usize) -> Color {
+    const CORES: [Color; 5] = [
+        Color::from_rgb(0.71, 0.61, 0.96),
+        Color::from_rgb(0.42, 0.75, 0.5),
+        Color::from_rgb(0.9, 0.7, 0.25),
+        Color::from_rgb(0.4, 0.68, 0.96),
+        Color::from_rgb(0.93, 0.5, 0.6),
+    ];
+    CORES[(coluna / 2) % CORES.len()]
+}
+
+fn linha_grafo(l: &LinhaGrafo) -> Element<'_, Msg> {
+    let desenho = iced::widget::Row::with_children(l.grafo.chars().enumerate().map(|(i, ch)| {
+        let simbolo = if ch == '*' { '●' } else { ch };
+        text(simbolo.to_string())
+            .font(MONO)
+            .size(if ch == '*' { 10 } else { 12 })
+            .color(cor_do_ramo(i))
+            .width(7)
+            .line_height(iced::widget::text::LineHeight::Absolute(18.into()))
+            .center()
+            .into()
+    }));
+    let Some(c) = &l.commit else {
+        return container(desenho).padding([0, 12]).height(18).into();
+    };
+    let mut linha = row![desenho].spacing(6).align_y(Alignment::Center);
+    for r in &c.refs {
+        let cabeca = r.starts_with("HEAD");
+        let nome = r.trim_start_matches("HEAD -> ").trim_start_matches("tag: ");
+        linha = linha.push(
+            container(text(nome.to_string()).size(10).font(MONO).color(if cabeca {
+                COR_PAINEL()
+            } else {
+                COR_TEXTO()
+            }))
+            .padding([0, 4])
+            .style(move |_| container::Style {
+                border: Border {
+                    color: COR_AZUL_ACENTO(),
+                    width: 1.0,
+                    radius: 4.0.into(),
+                },
+                ..fundo(if cabeca {
+                    COR_AZUL_ACENTO()
+                } else {
+                    Color::TRANSPARENT
+                })
+            }),
+        );
+    }
+    linha = linha.push(
+        text(c.assunto.clone())
+            .size(12)
+            .wrapping(iced::widget::text::Wrapping::None),
+    );
+    let dica = container(
+        column![
+            text(c.assunto.clone()).size(12),
+            text(format!("{} · {} · {}", c.hash, c.autor, c.quando))
+                .size(11)
+                .font(MONO)
+                .color(COR_TEXTO_MUTED())
+        ]
+        .spacing(4)
+        .max_width(420),
+    )
+    .padding([6, 8])
+    .style(tema::estilo_dica);
+    tooltip(
+        container(linha).padding([0, 12]).height(18).clip(true),
+        dica,
+        tooltip::Position::Right,
+    )
+    .into()
+}
+
 fn titulo_lado(t: &str) -> Element<'_, Msg> {
     text(t)
         .size(11)
@@ -588,6 +770,25 @@ pub fn nome_tema(t: highlighter::Theme) -> &'static str {
 
 #[cfg(test)]
 mod testes {
+    #[test]
+    fn grafo_separa_desenho_e_commit() {
+        let v = super::ler_grafo(
+            "* \u{1}abc1234\tHEAD -> master, origin/master\tprimeiro\tAna\thá 2 dias\n|\\  \n",
+        );
+        assert_eq!(v.len(), 2);
+        let c = v[0].commit.as_ref().unwrap();
+        assert_eq!(
+            (
+                v[0].grafo.as_str(),
+                c.hash.as_str(),
+                c.refs.len(),
+                c.assunto.as_str()
+            ),
+            ("*", "abc1234", 2, "primeiro")
+        );
+        assert!(v[1].commit.is_none());
+    }
+
     #[test]
     fn busca_acha_linha_e_pula_pasta_ignorada() {
         let raiz = std::env::temp_dir().join(format!("feathercode-busca-{}", std::process::id()));
