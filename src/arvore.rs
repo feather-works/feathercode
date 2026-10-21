@@ -70,6 +70,14 @@ impl Arvore {
         }
     }
 
+    /// Fecha todas as subpastas, mantendo os itens da raiz visíveis.
+    pub fn recolher(&mut self) {
+        self.abertas.clear();
+        self.abertas.insert(self.raiz.clone());
+        self.filhos.clear();
+        self.ler(&self.raiz.clone());
+    }
+
     pub fn linhas(&self) -> Vec<Linha> {
         let mut v = Vec::new();
         self.descer(&self.raiz, 0, &mut v);

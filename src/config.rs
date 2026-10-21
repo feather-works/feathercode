@@ -40,6 +40,8 @@ pub struct Config {
     pub boas_vindas: bool,
     /// Índice em `highlighter::Theme::ALL`; sem escolha, segue o tema claro/escuro.
     pub tema_codigo: Option<usize>,
+    /// Alterna tons suaves no fundo das linhas do código.
+    pub linhas_alternadas: bool,
 }
 
 fn caminho() -> Option<PathBuf> {
@@ -88,6 +90,7 @@ impl Config {
             iniciar_git: v["iniciar_git"].as_bool().unwrap_or(true),
             boas_vindas: v["boas_vindas"].as_bool().unwrap_or(false),
             tema_codigo: v["tema_codigo"].as_u64().map(|n| n as usize),
+            linhas_alternadas: v["linhas_alternadas"].as_bool().unwrap_or(false),
         }
     }
 
@@ -115,6 +118,7 @@ impl Config {
             "iniciar_git": self.iniciar_git,
             "boas_vindas": self.boas_vindas,
             "tema_codigo": self.tema_codigo,
+            "linhas_alternadas": self.linhas_alternadas,
         });
         // Preferência perdida não é dado do usuário: falha ao gravar só é ignorada.
         let _ = std::fs::create_dir_all(c.parent().expect("config tem pasta"));

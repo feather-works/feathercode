@@ -44,6 +44,7 @@ Regra que vale para tudo: tela nova é desenhada no artifact primeiro
 (https://claude.ai/artifact/Vg5ygNrD6ZpHo9NGmk629q) e só vira código depois de aprovada.
 
 **Git (referência: painel Source Control do VS Code, prints de 19/10)**
+- [x] Botão "Título com IA" ao lado de Commit: usa o agente selecionado para sugerir o título a partir do diff e dos nomes de arquivos novos, com revisão antes do commit.
 - [x] Pull, Push, Fetch (rodam numa aba do terminal) e Commit com mensagem (`add -A` + commit).
 - [x] Clicar numa mudança mostra a diferença contra o último commit (em linha, com +/−).
 - [ ] Diferença **lado a lado** (antes | depois, faixa hachurada onde não há linha), como o VS Code;
@@ -58,7 +59,8 @@ cursor destacada; trilho no estilo do VS Code; só a pena no topo.
 
 **Explorador**
 - [ ] Ícone por tipo de arquivo (`.py`, `.rs`, `.env`, `.gitignore`, `.md`, `.txt`…).
-- [ ] Botões no topo: novo arquivo, nova pasta, atualizar, recolher tudo.
+- [x] Botões no topo: atualizar e recolher tudo (limpa também o filtro).
+- [ ] Botões no topo: novo arquivo e nova pasta.
 
 **Agentes**
 - [x] Trocar o agente no rodapé do painel (seletor com os instalados). `adaptadores.rs` traduz o
@@ -72,9 +74,7 @@ cursor destacada; trilho no estilo do VS Code; só a pena no topo.
       (`--conversation <id>`); hoje o botão de histórico só aparece com o Claude Code.
 
 **Configurações**
-- [ ] Engrenagem no fim do trilho + Ctrl+, ; padrão da suíte (`feather_ui::configuracoes`,
-      como o FeatherSheet). Seções propostas: Aparência, Editor, Terminal, Agentes de IA,
-      Projetos, Atalhos, Sobre. Desenhar no artifact antes.
+- [x] Engrenagem no fim do trilho + Ctrl+, e menu Exibir; padrão da suíte (`feather_ui::configuracoes`). Seções: Aparência, Editor, Terminal, Agentes de IA, Projetos, Atalhos e Sobre. Implementado por pedido direto do usuário em 20/10/2026.
 
 **Editor**
 - [ ] Dois arquivos lado a lado (dividir o editor).
@@ -82,7 +82,10 @@ cursor destacada; trilho no estilo do VS Code; só a pena no topo.
 
 **Menus — triagem dos menus do VS Code (19/10). Regra 3: só entra o que funcionar.**
 - Vale fazer:
-  - Arquivo: Novo arquivo (Ctrl+N), Abrir arquivo, Abrir recente ▸, Salvar como, Salvar tudo,
+  - [x] Arquivo: Abrir arquivo (Ctrl+Shift+O), Salvar tudo (Ctrl+Shift+S).
+  - [x] Atalhos: Explorador (Ctrl+Shift+E), Buscar (Ctrl+Shift+F), Git (Ctrl+Shift+G),
+    focar/abrir Terminal (Ctrl+`), Comentar linha (Ctrl+/ e Ctrl+; no editor).
+  - Arquivo: Novo arquivo (Ctrl+N), Abrir recente ▸, Salvar como,
     Salvamento automático, Reverter arquivo, Fechar pasta, Sair (Ctrl+Q).
   - Editar: Desfazer/Refazer, Recortar/Copiar/Colar, Localizar (Ctrl+F), Substituir (Ctrl+H),
     Buscar/Substituir nos arquivos, Comentar linha (também Ctrl+/).

@@ -168,8 +168,7 @@ impl Code {
         )
         .padding([0, 10])
         .height(30)
-        .align_y(Alignment::Center)
-        .style(|_| fundo(COR_CROMO_2()));
+        .align_y(Alignment::Center);
         let corpo: Element<Msg> = match t.ativo() {
             Some(termo) => {
                 foco_por_clique(iced_term::TerminalView::show(termo).map(Msg::Term)).into()

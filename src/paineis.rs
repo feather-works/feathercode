@@ -470,6 +470,16 @@ impl Code {
                 self.agente_aberto,
                 Msg::AlternarAgente
             ),
+            Space::with_height(Length::Fill),
+            tooltip(
+                button(icone_traco("settings", 22.0))
+                    .on_press(Msg::Configuracoes(Some(0)))
+                    .width(Length::Fill)
+                    .height(44)
+                    .style(|_, s| item_lista(false, s, 5.0)),
+                "Configurações  Ctrl+,",
+                tooltip::Position::Right,
+            ),
         ]
         .padding([4, 0])
         .width(LARGURA_TRILHO)
@@ -655,8 +665,25 @@ impl Code {
                     },
                     ..button::Style::default()
                 });
+                let gerar = button(
+                    text(if self.titulo_pendente.is_some() {
+                        "Gerando…"
+                    } else {
+                        "Título com IA"
+                    })
+                    .size(12),
+                )
+                .on_press_maybe(
+                    (self.titulo_pendente.is_none() && !g.mudancas.is_empty())
+                        .then_some(Msg::GerarTituloCommit),
+                )
+                .padding([5, 8])
+                .style(|_, s| item_lista(false, s, 5.0));
                 let mut c = Column::new()
-                    .push(container(column![mensagem, commit].spacing(6)).padding([4, 12]))
+                    .push(
+                        container(column![mensagem, row![commit, gerar].spacing(6)].spacing(6))
+                            .padding([4, 12]),
+                    )
                     .push(Space::with_height(6))
                     .push(subtitulo_git(format!("Mudanças ({})", g.mudancas.len())));
                 if g.mudancas.is_empty() {
@@ -708,11 +735,28 @@ impl Code {
     fn itens_menu(&self, i: usize) -> Vec<Item> {
         match i {
             // Na página inicial não há pasta aberta: só o que funciona sem ela.
-            0 if self.inicio => vec![("Abrir pasta…", "Ctrl+O", Msg::AbrirPasta, false)],
+            0 if self.inicio => vec![
+                ("Abrir pasta…", "Ctrl+O", Msg::AbrirPasta, false),
+                (
+                    "Abrir arquivo…",
+                    "Ctrl+Shift+O",
+                    Msg::EscolherArquivo,
+                    false,
+                ),
+            ],
             0 => {
-                let mut v = vec![("Abrir pasta…", "Ctrl+O", Msg::AbrirPasta, false)];
+                let mut v = vec![
+                    ("Abrir pasta…", "Ctrl+O", Msg::AbrirPasta, false),
+                    (
+                        "Abrir arquivo…",
+                        "Ctrl+Shift+O",
+                        Msg::EscolherArquivo,
+                        false,
+                    ),
+                ];
                 if !self.abas.is_empty() {
                     v.push(("Salvar", "Ctrl+S", Msg::Salvar, false));
+                    v.push(("Salvar tudo", "Ctrl+Shift+S", Msg::SalvarTudo, false));
                     v.push(("Fechar aba", "", Msg::FecharAba(self.ativa), false));
                 }
                 v.push(("Início", "", Msg::IrInicio, false));
@@ -725,7 +769,7 @@ impl Code {
                     vec![
                         (
                             "Explorador",
-                            "Ctrl+B",
+                            "Ctrl+Shift+E",
                             Msg::Lado(Lado::Explorador),
                             self.lado == Some(Lado::Explorador),
                         ),
@@ -737,7 +781,7 @@ impl Code {
                         ),
                         (
                             "Git",
-                            "",
+                            "Ctrl+Shift+G",
                             Msg::Lado(Lado::Git),
                             self.lado == Some(Lado::Git),
                         ),
@@ -755,6 +799,20 @@ impl Code {
                         ),
                     ]
                 };
+                if !self.inicio {
+                    v.push((
+                        "Linhas alternadas no editor",
+                        "",
+                        Msg::AlternarLinhas,
+                        self.config.linhas_alternadas,
+                    ));
+                }
+                v.push((
+                    "Configurações…",
+                    "Ctrl+,",
+                    Msg::Configuracoes(Some(0)),
+                    false,
+                ));
                 for (n, (nome, t)) in [
                     ("Escuro", Tema::Escuro),
                     ("Claro", Tema::Claro),
@@ -783,7 +841,7 @@ impl Code {
             2 => vec![
                 ("Rodar projeto", "F5", Msg::RodarProjeto, false),
                 ("Novo terminal", "", Msg::NovoTerminal, false),
-                ("Ir para o terminal", "", Msg::FocarTerminal, false),
+                ("Ir para o terminal", "Ctrl+`", Msg::FocarTerminal, false),
             ],
             _ => {
                 let mut v = vec![("Nova conversa", "", Msg::NovaConversa, false)];
@@ -1120,4 +1178,53 @@ mod testes {
         assert_eq!((v[0].linha, v[0].texto.as_str()), (1, "let Margens = 1;"));
         let _ = std::fs::remove_dir_all(&raiz);
     }
+}
+
+/// O commit atual inclui todas as mudanças rastreadas e os nomes dos arquivos novos.
+pub async fn titulo_por_ia(raiz: PathBuf, provedor: agente::Provedor) -> Result<String, String> {
+    let executar = |args: Vec<&'static str>| {
+        tokio::process::Command::new("git")
+            .args(args)
+            .current_dir(&raiz)
+            .kill_on_drop(true)
+            .output()
+    };
+    let diff = executar(vec!["diff", "--no-ext-diff", "--no-textconv", "HEAD", "--"])
+        .await
+        .map_err(|e| e.to_string())?;
+    let texto = if diff.status.success() {
+        String::from_utf8_lossy(&diff.stdout).into_owned()
+    } else {
+        // Antes do primeiro commit, HEAD ainda não existe.
+        let mut texto = String::new();
+        for args in [
+            vec!["diff", "--no-ext-diff", "--no-textconv", "--cached", "--"],
+            vec!["diff", "--no-ext-diff", "--no-textconv", "--"],
+        ] {
+            let saida = executar(args).await.map_err(|e| e.to_string())?;
+            if !saida.status.success() {
+                return Err(String::from_utf8_lossy(&saida.stderr).trim().to_owned());
+            }
+            texto.push_str(&String::from_utf8_lossy(&saida.stdout));
+        }
+        texto
+    };
+    let novos = executar(vec!["ls-files", "--others", "--exclude-standard"])
+        .await
+        .map_err(|e| e.to_string())?;
+    if !novos.status.success() {
+        return Err(String::from_utf8_lossy(&novos.stderr).trim().to_owned());
+    }
+    let contexto = format!(
+        "Arquivos novos (nomes):\n{}\nDiferenças rastreadas:\n{}",
+        String::from_utf8_lossy(&novos.stdout)
+            .chars()
+            .take(8_000)
+            .collect::<String>(),
+        texto.chars().take(40_000).collect::<String>()
+    );
+    if texto.trim().is_empty() && novos.stdout.is_empty() {
+        return Err("Não há alterações para resumir.".into());
+    }
+    agente::sugerir_titulo(provedor, raiz, contexto).await
 }
