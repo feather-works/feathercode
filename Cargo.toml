@@ -1,6 +1,6 @@
 [package]
 name = "feathercode"
-version = "0.0.1"
+version = "0.0.2"
 description = "Editor de código da suíte FeatherWorks, com o Claude Code no painel lateral"
 authors = ["FeatherWorks"]
 edition = "2021"
