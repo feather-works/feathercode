@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-FeatherCode is a code editor for the FeatherWorks suite, written in Rust with `pelicano`, the suite's own UI library (`../pelicano`, path dependency for now). Claude Code runs in a side panel. Code, comments, UI text and commit messages are all in Portuguese (pt-BR). Keep it that way.
+FeatherCode is a code editor for the FeatherWorks suite, written in Rust with `pelicano`, the suite's own UI library (git dependency pinned by tag, like `feather-ui` v0.3.0, which is built on it). Claude Code runs in a side panel. Code, comments, UI text and commit messages are all in Portuguese (pt-BR). Keep it that way.
 
 ## Commands
 
