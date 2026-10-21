@@ -20,28 +20,23 @@ use feather_ui::tema::{
     COR_ERRO, COR_FUNDO_JANELA, COR_HOVER, COR_PAINEL, COR_PAINEL_FAIXA, COR_TEXTO,
     COR_TEXTO_MUTED,
 };
-use iced::widget::text::{LineHeight, Wrapping};
-use iced::widget::{
-    button, column, container, horizontal_space, markdown, mouse_area, pick_list, progress_bar,
-    row, scrollable, stack, text, text_editor, text_input, tooltip, Column, Space,
-};
-use iced::{
-    font, highlighter, keyboard, window, Alignment, Background, Border, Color, Element, Font,
-    Length, Size, Subscription, Task,
-};
 use paineis::Lado;
+use pelicano::{
+    button, canvas, column, container, horizontal_space, markdown, mouse_area, pick_list,
+    progress_bar, row, scrollable, stack, text, text_editor, text_input, tooltip, Align, Border,
+    Color, Content, CursorIcon, Direction, Element, Event, Font, Highlight, Key, Length, NamedKey,
+    Padding, Point, Shadow, Size, Space, Status, Style, Subscription, Task, Theme,
+    TooltipPosition, WindowCmd, WindowId,
+};
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc::UnboundedSender;
 
-const NEGRITO: Font = Font {
-    weight: font::Weight::Semibold,
-    ..Font::DEFAULT
-};
-const MONO: Font = Font::MONOSPACE;
+const NEGRITO: Font = Font::SEMIBOLD;
+const MONO: Font = Font::MONO;
 /// Índice de "Roxo" em `tema::ACENTOS`: a cor do FeatherCode.
 const ROXO: usize = 5;
-const AMARELO: Color = Color::from_rgb(0.9, 0.7, 0.25);
-const VERDE: Color = Color::from_rgb(0.42, 0.75, 0.5);
+const AMARELO: Color = Color::rgb(0.9, 0.7, 0.25);
+const VERDE: Color = Color::rgb(0.42, 0.75, 0.5);
 const LARGURA_ARVORE: f32 = 240.0;
 const LARGURA_AGENTE: f32 = 380.0;
 const ALTURA_ABAS: f32 = 36.0;
@@ -51,53 +46,40 @@ const VAO: f32 = 6.0;
 const ALTURA_STATUS: f32 = 24.0;
 const TAMANHO_FONTE: f32 = 13.0;
 const ALTURA_LINHA: f32 = 20.0;
-/// Largura do caractere da fonte mono em 13 px (7,8) com folga, para não cortar a linha mais longa.
-const LARGURA_CARACTERE: f32 = 8.0;
 const MARGEM_V: f32 = 8.0;
 const MARGEM_H: f32 = 12.0;
+/// Tom das linhas alternadas. O pelicano mistura as cores em espaço linear, onde um pouco de
+/// claro sobre o fundo escuro já aparece muito: 1% dá uns 6 tons de diferença.
+const ALFA_LISTRAS: f32 = 0.01;
 
-fn main() -> iced::Result {
+fn main() -> Result<(), pelicano::Error> {
     let config = config::Config::ler();
     tema::definir_tema(config.tema.escuro(), ROXO);
     // Pena da suíte na cor de destaque do FeatherCode.
     marca::definir_marca(Produto::FeatherSheet, true);
-    #[allow(unused_mut)]
-    let mut janela = window::Settings {
+    let janela = marca::preparar_janela(pelicano::Settings {
+        title: "FeatherCode".into(),
         size: Size::new(1380.0, 860.0),
         min_size: Some(Size::new(960.0, 560.0)),
         // A barra de título é desenhada pelo app, como no resto da suíte.
         decorations: false,
+        app_id: Some("feathercode".into()),
         ..Default::default()
-    };
-    #[cfg(target_os = "linux")]
-    {
-        janela.platform_specific.application_id = "feathercode".into();
-    }
-    iced::application("FeatherCode", Code::update, Code::view)
-        .theme(|_| tema::tema_iced())
-        .window(janela)
-        .subscription(Code::subscription)
-        .run_with(move || Code::novo(config))
+    });
+    pelicano::run(janela, move || Code::novo(config))
 }
 
 struct Aba {
     caminho: PathBuf,
-    conteudo: text_editor::Content,
-    sujo: bool,
-    desfazer: edicao::Desfazer,
-    /// Colunas da linha mais comprida: a largura da área rolável.
-    maior: usize,
+    conteudo: Content,
+    /// `Content::version` da última vez que o arquivo foi lido ou salvo.
+    salvo: u64,
 }
 
-fn maior_linha(t: &str) -> usize {
-    t.lines()
-        .map(|l| {
-            l.chars()
-                .map(|c| if c == '\t' { 4 } else { 1 })
-                .sum::<usize>()
-        })
-        .max()
-        .unwrap_or(0)
+impl Aba {
+    fn sujo(&self) -> bool {
+        self.conteudo.version() != self.salvo
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -140,13 +122,11 @@ enum Msg {
     PastaEscolhida(Option<PathBuf>),
     Alternar(PathBuf),
     AbrirArquivo(PathBuf),
-    Editar(text_editor::Action),
     TrocarAba(usize),
     FecharAba(usize),
     Salvar,
     /// Põe um texto no campo do chat (clique numa mensagem antiga).
     Pedido(String),
-    EditarPedido(text_editor::Action),
     /// Botão de clipe: escolhe imagens para mandar junto com o pedido.
     Anexar,
     Anexadas(Vec<PathBuf>),
@@ -166,11 +146,10 @@ enum Msg {
     Copiar(String),
     FocarTerminal,
     RodarProjeto,
-    Term(iced_term::Event),
+    Term(u64, pelicano::TerminalEvent),
     NovoTerminal,
     FecharTerminal(u64),
     TrocarTerminal(usize),
-    Janela(Option<window::Id>),
     Tamanho(Size),
     Capturar,
     Detalhes,
@@ -178,8 +157,7 @@ enum Msg {
     Retomar(String),
     IrInicio,
     Ini(inicio::Ini),
-    Link(markdown::Url),
-    Capturado(window::Screenshot),
+    Link(String),
     Arrastar,
     Minimizar,
     Maximizar,
@@ -216,8 +194,28 @@ enum Msg {
     ProcurarArquivo,
     Recuar(bool),
     Comentar,
-    /// Ctrl+Z (`false`) e Ctrl+Y / Ctrl+Shift+Z (`true`).
-    Desfazer(bool),
+    /// Começa (`Some`) ou termina (`None`) o arraste de uma divisa entre os painéis.
+    Redimensionar(Option<Divisa>),
+    /// O mouse andou durante o arraste (posição na janela).
+    Mover(Point),
+    /// Abre (`Some`, onde clicou) ou fecha o menu do botão direito do editor.
+    MenuContexto(Option<Point>),
+    Recortar,
+    CopiarSelecao,
+    Colar,
+    Colado(Option<String>),
+    RodarSelecao,
+    /// Põe a seleção (ou a linha do cursor) como trecho no próximo pedido do chat.
+    MandarTrecho,
+    TirarTrecho(usize),
+}
+
+/// Vão entre painéis que dá para arrastar.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Divisa {
+    Lado,
+    Agente,
+    Terminal,
 }
 
 struct Chat {
@@ -228,9 +226,11 @@ struct Chat {
     fila: Vec<String>,
     itens: Vec<Item>,
     ocupado: bool,
-    pedido: text_editor::Content,
+    pedido: Content,
     /// Imagens que vão com o próximo pedido: nome do arquivo e bloco `image` já em base64.
     imagens: Vec<(String, serde_json::Value)>,
+    /// Trechos de código que vão com o próximo pedido: rótulo (`edicao.rs 300:500`) e o texto.
+    trechos: Vec<(String, String)>,
     modo: Modo,
     /// Agente do painel; trocar começa uma conversa nova.
     provedor: agente::Provedor,
@@ -253,8 +253,9 @@ impl Chat {
             fila: Vec::new(),
             itens: Vec::new(),
             ocupado: false,
-            pedido: text_editor::Content::new(),
+            pedido: Content::new(),
             imagens: Vec::new(),
+            trechos: Vec::new(),
             modo,
             provedor,
             uso: (None, None),
@@ -279,11 +280,12 @@ struct Code {
     chat: Chat,
     outros_chats: Vec<Chat>,
     proximo_chat: u64,
+    /// Os agentes do seletor do rodapé (o `pick_list` empresta a lista).
+    agentes: Vec<agente::Provedor>,
     terminais: terminal::Terminais,
     aviso: String,
     ramo: Option<String>,
     tamanho: Size,
-    janela: Option<window::Id>,
     ultimo_clique_barra: Option<std::time::Instant>,
     /// Painel ao lado do trilho; `None` = recolhido.
     lado: Option<Lado>,
@@ -306,6 +308,82 @@ struct Code {
     filtro: String,
     /// Lida na primeira letra do filtro; vazia de novo quando a pasta muda.
     todos_arquivos: Vec<PathBuf>,
+    /// Código de exemplo das configurações, pintado com o tema de cores escolhido.
+    amostra: Content,
+    /// Largura escolhida no arraste para o painel ao lado do trilho; `None` = a padrão de cada painel.
+    largura_lado: Option<f32>,
+    largura_agente: f32,
+    altura_terminal: f32,
+    arrastando: Option<Divisa>,
+    /// Menu do botão direito do editor aberto nesse ponto.
+    contexto: Option<Point>,
+}
+
+impl pelicano::App for Code {
+    type Msg = Msg;
+
+    fn update(&mut self, msg: Msg) -> Task<Msg> {
+        Code::update(self, msg)
+    }
+
+    fn view(&self) -> Element<'_, Msg> {
+        Code::view(self)
+    }
+
+    fn subscription(&self) -> Subscription<Msg> {
+        Code::subscription(self)
+    }
+
+    fn theme(&self) -> Theme {
+        tema::tema()
+    }
+
+    fn on_event(&self, ev: &Event) -> Option<Msg> {
+        match ev {
+            Event::Resized(s) => Some(Msg::Tamanho(*s)),
+            // Arquivo solto na janela vira anexo do chat (só imagens são aceitas).
+            Event::FileDropped(p) => Some(Msg::Anexadas(vec![p.clone()])),
+            _ => None,
+        }
+    }
+
+    /// Atalhos: só chegam aqui com o foco fora do campo, do editor e do terminal (eles pegam a tecla).
+    fn on_unhandled_event(&self, _: WindowId, ev: &Event) -> Option<Msg> {
+        let Event::Key {
+            key,
+            modifiers: m,
+            pressed: true,
+            ..
+        } = ev
+        else {
+            return None;
+        };
+        let ctrl = m.control_key() || m.super_key();
+        let shift = m.shift_key();
+        match key {
+            Key::Named(NamedKey::F5) => Some(Msg::RodarProjeto),
+            Key::Named(NamedKey::Escape) => Some(Msg::Escape),
+            Key::Character(c) => match c.as_str() {
+                "," if ctrl => Some(Msg::Configuracoes(Some(0))),
+                "s" | "S" if ctrl && shift => Some(Msg::SalvarTudo),
+                "s" if ctrl => Some(Msg::Salvar),
+                "o" | "O" if ctrl && shift => Some(Msg::EscolherArquivo),
+                "e" | "E" if ctrl && shift => Some(Msg::Lado(Lado::Explorador)),
+                "g" | "G" if ctrl && shift => Some(Msg::Lado(Lado::Git)),
+                "f" | "F" if ctrl && shift => Some(Msg::Lado(Lado::Buscar)),
+                "`" if ctrl => Some(Msg::FocarTerminal),
+                "o" if ctrl => Some(Msg::AbrirPasta),
+                "b" if ctrl => Some(Msg::Lado(Lado::Explorador)),
+                "p" if ctrl => Some(Msg::ProcurarArquivo),
+                "j" if ctrl => Some(Msg::AlternarTerminal),
+                "1" if m.is_empty() => Some(Msg::ResponderPendente(Resposta::Gravou)),
+                "2" if m.is_empty() => Some(Msg::ResponderPendente(Resposta::Sempre)),
+                "3" if m.is_empty() => Some(Msg::ResponderPendente(Resposta::Recusou)),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
 }
 
 impl Code {
@@ -317,8 +395,10 @@ impl Code {
 
     fn novo(mut config: config::Config) -> (Self, Task<Msg>) {
         // Sem pasta na linha de comando, abre na página inicial.
+        // Nos testes, o argumento é do executor de testes (`--quiet`, o filtro), não uma pasta.
         let pedida = std::env::args_os()
             .nth(1)
+            .filter(|_| !cfg!(test))
             .map(PathBuf::from)
             .map(|p| p.canonicalize().unwrap_or(p));
         if let Some(p) = &pedida {
@@ -338,11 +418,11 @@ impl Code {
             chat: Chat::novo(0, agente::Provedor::Claude, Modo::Perguntar),
             outros_chats: Vec::new(),
             proximo_chat: 1,
+            agentes: vec![agente::Provedor::Claude],
             terminais: terminal::Terminais::default(),
             aviso: String::new(),
             ramo: ramo(&pasta),
             tamanho: Size::new(1380.0, 860.0),
-            janela: None,
             ultimo_clique_barra: None,
             lado: Some(Lado::Explorador),
             agente_aberto: true,
@@ -360,6 +440,12 @@ impl Code {
             configuracoes: None,
             filtro: String::new(),
             todos_arquivos: Vec::new(),
+            amostra: Content::with_text(preferencias::AMOSTRA),
+            largura_lado: None,
+            largura_agente: LARGURA_AGENTE,
+            altura_terminal: ALTURA_TERMINAL,
+            arrastando: None,
+            contexto: None,
         };
         let mut code = code;
         if !code.inicio {
@@ -378,6 +464,13 @@ impl Code {
             .and_then(|v| v.parse().ok())
         {
             code.menu = Some(i);
+        }
+        // FEATHERCODE_CAPTURAR_CONFIG=1 abre as configurações nessa seção (1 = Editor).
+        if let Some(i) = std::env::var("FEATHERCODE_CAPTURAR_CONFIG")
+            .ok()
+            .and_then(|v| v.parse().ok())
+        {
+            code.configuracoes = Some(i);
         }
         if std::env::var_os("FEATHERCODE_CAPTURAR_HISTORICO").is_some() {
             code.chat.historico = Some(agente::sessoes(&code.arvore.raiz));
@@ -402,63 +495,21 @@ impl Code {
                 code.update(Msg::VerDiff(code.arvore.raiz.join(arquivo))),
             ]);
         }
-        (
-            code,
-            Task::batch([
-                window::get_latest().map(Msg::Janela),
-                inicio::conferir_claude(),
-                git,
-            ]),
-        )
+        let capturar = if std::env::var_os("FEATHERCODE_CAPTURAR").is_some() {
+            // O `sleep` nasce dentro do async: o `novo` roda antes do runtime do tokio.
+            Task::perform(
+                async { tokio::time::sleep(std::time::Duration::from_millis(900)).await },
+                |_| Msg::Capturar,
+            )
+        } else {
+            Task::none()
+        };
+        (code, Task::batch([inicio::conferir_claude(), git, capturar]))
     }
 
     fn subscription(&self) -> Subscription<Msg> {
-        let teclas = keyboard::on_key_press(|tecla, m| match tecla.as_ref() {
-            keyboard::Key::Character(",") if m.command() => Some(Msg::Configuracoes(Some(0))),
-            keyboard::Key::Character("s" | "S") if m.command() && m.shift() => {
-                Some(Msg::SalvarTudo)
-            }
-            keyboard::Key::Character("s") if m.command() => Some(Msg::Salvar),
-            keyboard::Key::Character("o" | "O") if m.command() && m.shift() => {
-                Some(Msg::EscolherArquivo)
-            }
-            keyboard::Key::Character("e" | "E") if m.command() && m.shift() => {
-                Some(Msg::Lado(Lado::Explorador))
-            }
-            keyboard::Key::Character("g" | "G") if m.command() && m.shift() => {
-                Some(Msg::Lado(Lado::Git))
-            }
-            keyboard::Key::Character("`") if m.command() => Some(Msg::FocarTerminal),
-            keyboard::Key::Character("o") if m.command() => Some(Msg::AbrirPasta),
-            keyboard::Key::Character("b") if m.command() => Some(Msg::Lado(Lado::Explorador)),
-            keyboard::Key::Character("p") if m.command() => Some(Msg::ProcurarArquivo),
-            keyboard::Key::Named(keyboard::key::Named::F5) => Some(Msg::RodarProjeto),
-            keyboard::Key::Character("j") if m.command() => Some(Msg::AlternarTerminal),
-            keyboard::Key::Character("f" | "F") if m.command() && m.shift() => {
-                Some(Msg::Lado(Lado::Buscar))
-            }
-            keyboard::Key::Named(keyboard::key::Named::Escape) => Some(Msg::Escape),
-            // Só chegam aqui com o foco fora do campo, do editor e do terminal (eles capturam a tecla).
-            keyboard::Key::Character("1") if m.is_empty() => {
-                Some(Msg::ResponderPendente(Resposta::Gravou))
-            }
-            keyboard::Key::Character("2") if m.is_empty() => {
-                Some(Msg::ResponderPendente(Resposta::Sempre))
-            }
-            keyboard::Key::Character("3") if m.is_empty() => {
-                Some(Msg::ResponderPendente(Resposta::Recusou))
-            }
-            _ => None,
-        });
-        let mut subs = vec![
-            teclas,
-            window::resize_events().map(|(_, s)| Msg::Tamanho(s)),
-            // Arquivo solto na janela vira anexo do chat (só imagens são aceitas).
-            iced::event::listen_with(|e, _, _| match e {
-                iced::Event::Window(window::Event::FileDropped(p)) => Some(Msg::Anexadas(vec![p])),
-                _ => None,
-            }),
-        ];
+        use pelicano::futures::StreamExt;
+        let mut subs = Vec::new();
         for chat in std::iter::once(&self.chat).chain(self.outros_chats.iter()) {
             if chat.ligado {
                 let id = chat.conversa;
@@ -468,11 +519,11 @@ impl Code {
                     chat.modo.id(),
                     chat.retomar.clone(),
                 );
-                subs.push(
-                    Subscription::run_with_id(("agente", id), conversa)
-                        .with(id)
-                        .map(|(id, evento)| Msg::EventoChat(id, evento)),
-                );
+                // O id vai no fluxo: o `map` da assinatura não pode capturar nada.
+                subs.push(Subscription::run_with_id(
+                    ("agente", id),
+                    conversa.map(move |evento| Msg::EventoChat(id, evento)),
+                ));
             }
         }
         subs.push(self.terminais.subscription());
@@ -492,21 +543,15 @@ impl Code {
         self.enviar(linha);
     }
 
-    fn focar_terminal(&self) -> Task<Msg> {
-        self.terminais.ativo().map_or_else(Task::none, |t| {
-            iced_term::TerminalView::focus(t.widget_id())
-        })
-    }
-
-    fn tema_codigo(&self) -> highlighter::Theme {
+    fn tema_codigo(&self) -> Highlight {
         match self
             .config
             .tema_codigo
-            .and_then(|i| highlighter::Theme::ALL.get(i))
+            .and_then(|i| Highlight::ALL.get(i))
         {
             Some(t) => *t,
-            None if tema::escuro() => highlighter::Theme::Base16Ocean,
-            None => highlighter::Theme::InspiredGitHub,
+            None if tema::escuro() => Highlight::Base16Ocean,
+            None => Highlight::InspiredGitHub,
         }
     }
 
@@ -523,11 +568,10 @@ impl Code {
         let Some(aba) = self.aba() else {
             return String::new();
         };
-        let (linha, _) = aba.conteudo.cursor_position();
+        let (linha, _) = aba.conteudo.cursor();
         let mut s = format!(
-            "\n\n<contexto_do_editor>\nArquivo aberto no FeatherCode: {} (cursor na linha {})",
+            "\n\n<contexto_do_editor>\nArquivo aberto no FeatherCode: {} (cursor na linha {linha})",
             self.relativo(&aba.caminho).display(),
-            linha + 1
         );
         if let Some(sel) = aba.conteudo.selection().filter(|s| !s.trim().is_empty()) {
             // shortcut: seleção cortada em 20 mil caracteres; mandar como anexo se fizer falta.
@@ -540,15 +584,20 @@ impl Code {
 
     /// Recarrega do disco as abas sem mudança local que o agente alterou.
     fn recarregar_abas(&mut self) {
-        for aba in self.abas.iter_mut().filter(|a| !a.sujo) {
+        for aba in self.abas.iter_mut().filter(|a| !a.sujo()) {
             // shortcut: aba com mudança não salva fica como está; avisar do conflito quando incomodar.
             if let Ok(t) = std::fs::read_to_string(&aba.caminho) {
                 if t.trim_end() != aba.conteudo.text().trim_end() {
-                    aba.maior = maior_linha(&t);
-                    aba.conteudo = text_editor::Content::with_text(&t);
+                    aba.conteudo = Content::with_text(&t);
+                    aba.salvo = aba.conteudo.version();
                 }
             }
         }
+    }
+
+    /// Desce o chat até a última mensagem, como o `anchor_bottom` fazia.
+    fn rolar_chat() -> Task<Msg> {
+        Task::snap_to("chat", Point::new(0.0, 1.0))
     }
 
     fn sinal(&mut self, s: Sinal) {
@@ -582,7 +631,7 @@ impl Code {
     }
 
     fn abrir_pasta(&mut self, p: PathBuf) -> Task<Msg> {
-        if self.abas.iter().any(|a| a.sujo) {
+        if self.abas.iter().any(Aba::sujo) {
             self.aviso = "Salve ou feche as abas com mudanças antes de trocar de pasta.".into();
             return Task::none();
         }
@@ -624,25 +673,105 @@ impl Code {
             msg,
             Msg::Escape
                 | Msg::Menu(_)
-                | Msg::Janela(_)
                 | Msg::Capturar
-                | Msg::Capturado(_)
                 | Msg::Agente(_)
                 | Msg::EventoChat(_, _)
                 | Msg::Tamanho(_)
-                | Msg::Term(_)
+                | Msg::Mover(_)
+                | Msg::Term(_, _)
                 | Msg::Git(_)
                 | Msg::Achados(_)
                 | Msg::Ini(inicio::Ini::ClaudeVersao(_) | inicio::Ini::OutrosAgentes(_))
         ) {
             self.menu = None;
+            self.contexto = None;
         }
         match msg {
             Msg::Menu(m) => self.menu = m,
+            Msg::Redimensionar(d) => self.arrastando = d,
+            Msg::MenuContexto(p) => self.contexto = p,
+            Msg::CopiarSelecao | Msg::Recortar => {
+                let Some(aba) = self.abas.get(self.ativa) else {
+                    return Task::none();
+                };
+                let Some(sel) = aba.conteudo.selection() else {
+                    return Task::none();
+                };
+                if matches!(msg, Msg::Recortar) {
+                    aba.conteudo.insert("");
+                }
+                return Task::batch([Task::write_clipboard(sel), Task::focus("editor")]);
+            }
+            Msg::Colar => return Task::read_clipboard(Msg::Colado),
+            Msg::Colado(texto) => {
+                if let (Some(aba), Some(t)) = (self.abas.get(self.ativa), texto) {
+                    aba.conteudo.insert(&t);
+                }
+                return Task::focus("editor");
+            }
+            Msg::RodarSelecao => {
+                let Some(sel) = self.aba().and_then(|a| a.conteudo.selection()) else {
+                    return Task::none();
+                };
+                self.terminal_aberto = true;
+                match self.terminais.rodar(&self.arvore.raiz, sel.trim()) {
+                    Ok(_) => return self.terminais.focar(),
+                    Err(e) => self.aviso = e,
+                }
+            }
+            Msg::MandarTrecho => {
+                let Some(aba) = self.aba() else {
+                    return Task::none();
+                };
+                let (ini, fim) = edicao::linhas_da_selecao(&aba.conteudo);
+                let codigo: Vec<String> = (ini..=fim).filter_map(|i| aba.conteudo.line(i)).collect();
+                let nome = aba
+                    .caminho
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let rotulo = if ini == fim {
+                    format!("{nome} {ini}")
+                } else {
+                    format!("{nome} {ini}:{fim}")
+                };
+                let texto = format!(
+                    "Trecho de {}, linhas {ini} a {fim}:\n```\n{}\n```",
+                    self.relativo(&aba.caminho).display(),
+                    codigo.join("\n")
+                );
+                self.chat.trechos.push((rotulo, texto));
+                self.agente_aberto = true;
+                return Task::focus("pedido");
+            }
+            Msg::TirarTrecho(i) => {
+                if i < self.chat.trechos.len() {
+                    self.chat.trechos.remove(i);
+                }
+            }
+            Msg::Mover(p) => {
+                // shortcut: tamanhos valem até fechar o app; gravar na config se pedirem.
+                // min/max em vez de clamp: janela minimizada tem tamanho 0 e o clamp entraria em pânico.
+                let (w, h) = (self.tamanho.width, self.tamanho.height);
+                match self.arrastando {
+                    Some(Divisa::Lado) => {
+                        self.largura_lado = Some((p.x - paineis::LARGURA_TRILHO).min(w / 2.0).max(160.0))
+                    }
+                    Some(Divisa::Agente) => {
+                        self.largura_agente = (w - p.x - VAO).min(w / 2.0).max(280.0)
+                    }
+                    Some(Divisa::Terminal) => {
+                        self.altura_terminal =
+                            (h - ALTURA_STATUS - VAO - p.y).min(h - 260.0).max(80.0)
+                    }
+                    None => {}
+                }
+            }
             Msg::Configuracoes(secao) => self.configuracoes = secao,
             Msg::Escape => {
-                if self.menu.is_some() {
+                if self.menu.is_some() || self.contexto.is_some() {
                     self.menu = None;
+                    self.contexto = None;
                 } else {
                     self.configuracoes = None;
                 }
@@ -655,58 +784,28 @@ impl Code {
             }
             Msg::ProcurarArquivo => {
                 self.lado = Some(Lado::Explorador);
-                return text_input::focus(text_input::Id::new("filtro"));
+                return Task::focus("filtro");
             }
             Msg::Recuar(mais) => {
-                let Some(aba) = self.abas.get_mut(self.ativa) else {
+                let Some(aba) = self.abas.get(self.ativa) else {
                     return Task::none();
                 };
-                aba.desfazer.antes_de_editar(&aba.conteudo, false);
                 // Tab sem seleção só põe espaços no cursor, como em qualquer editor.
                 if mais && aba.conteudo.selection().is_none() {
-                    for _ in 0..4 {
-                        aba.conteudo
-                            .perform(text_editor::Action::Edit(text_editor::Edit::Insert(' ')));
-                    }
+                    aba.conteudo.insert("    ");
                 } else {
-                    let (ini, fim) = edicao::linhas_da_selecao(&aba.conteudo);
-                    let (_, col) = aba.conteudo.cursor_position();
-                    let novo = edicao::recuar(&aba.conteudo.text(), ini, fim, mais);
-                    let col = if mais { col + 4 } else { col.saturating_sub(4) };
-                    edicao::trocar_texto(&mut aba.conteudo, &novo, ini, fim, col);
-                }
-                aba.sujo = true;
-                aba.maior = maior_linha(&aba.conteudo.text());
-            }
-            Msg::Desfazer(refazer) => {
-                let Some(aba) = self.abas.get_mut(self.ativa) else {
-                    return Task::none();
-                };
-                let mudou = if refazer {
-                    aba.desfazer.refazer(&mut aba.conteudo)
-                } else {
-                    aba.desfazer.desfazer(&mut aba.conteudo)
-                };
-                if mudou {
-                    aba.sujo = true;
-                    aba.maior = maior_linha(&aba.conteudo.text());
+                    edicao::recuar(&aba.conteudo, mais);
                 }
             }
             Msg::Comentar => {
-                let Some(aba) = self.abas.get_mut(self.ativa) else {
+                let Some(aba) = self.abas.get(self.ativa) else {
                     return Task::none();
                 };
                 let Some(marca) = edicao::marca_comentario(&aba.caminho) else {
                     self.aviso = "Não sei comentar este tipo de arquivo.".into();
                     return Task::none();
                 };
-                aba.desfazer.antes_de_editar(&aba.conteudo, false);
-                let (ini, fim) = edicao::linhas_da_selecao(&aba.conteudo);
-                let (_, col) = aba.conteudo.cursor_position();
-                let novo = edicao::comentar(&aba.conteudo.text(), ini, fim, marca);
-                edicao::trocar_texto(&mut aba.conteudo, &novo, ini, fim, col);
-                aba.sujo = true;
-                aba.maior = maior_linha(&aba.conteudo.text());
+                edicao::comentar(&aba.conteudo, marca);
             }
             Msg::Lado(l) => {
                 self.lado = if self.lado == Some(l) && l != Lado::Buscar {
@@ -715,7 +814,7 @@ impl Code {
                     Some(l)
                 };
                 match self.lado {
-                    Some(Lado::Buscar) => return text_input::focus(text_input::Id::new("busca")),
+                    Some(Lado::Buscar) => return Task::focus("busca"),
                     Some(Lado::Git) => return self.update(Msg::GitAtualizar),
                     _ => {}
                 }
@@ -752,23 +851,10 @@ impl Code {
             }
             Msg::IrPara(p, linha) => {
                 let abrir = self.update(Msg::AbrirArquivo(p));
-                if let Some(aba) = self.abas.get_mut(self.ativa) {
-                    aba.conteudo.perform(text_editor::Action::Move(
-                        text_editor::Motion::DocumentStart,
-                    ));
-                    for _ in 0..linha {
-                        aba.conteudo
-                            .perform(text_editor::Action::Move(text_editor::Motion::Down));
-                    }
+                if let Some(aba) = self.abas.get(self.ativa) {
+                    aba.conteudo.go_to_line(linha + 1);
                 }
-                let y = (linha as f32 * ALTURA_LINHA - 120.0).max(0.0);
-                return Task::batch([
-                    abrir,
-                    scrollable::scroll_to(
-                        scrollable::Id::new("editor"),
-                        scrollable::AbsoluteOffset { x: 0.0, y },
-                    ),
-                ]);
+                return Task::batch([abrir, Task::focus("editor")]);
             }
             Msg::GitAtualizar => {
                 return Task::perform(paineis::status_git(self.arvore.raiz.clone()), Msg::Git)
@@ -780,7 +866,7 @@ impl Code {
                     .terminais
                     .rodar_git(&self.arvore.raiz, &format!("git {cmd}"))
                 {
-                    Ok(_) => return self.focar_terminal(),
+                    Ok(_) => return self.terminais.focar(),
                     Err(e) => self.aviso = e,
                 }
             }
@@ -865,7 +951,7 @@ impl Code {
             Msg::PastaEscolhida(Some(p)) => return self.abrir_pasta(p),
             Msg::Ini(m) => return self.atualizar_inicio(m),
             Msg::IrInicio => {
-                if self.abas.iter().any(|a| a.sujo) {
+                if self.abas.iter().any(Aba::sujo) {
                     self.aviso =
                         "Salve ou feche as abas com mudanças antes de voltar ao início.".into();
                 } else {
@@ -916,12 +1002,11 @@ impl Code {
                     match std::fs::read_to_string(&p) {
                         Ok(t) => {
                             self.config.usar_arquivo(p.clone());
+                            let conteudo = Content::with_text(&t);
                             self.abas.push(Aba {
                                 caminho: p,
-                                maior: maior_linha(&t),
-                                conteudo: text_editor::Content::with_text(&t),
-                                sujo: false,
-                                desfazer: Default::default(),
+                                salvo: conteudo.version(),
+                                conteudo,
                             });
                             self.ativa = self.abas.len() - 1;
                             self.aviso.clear();
@@ -931,47 +1016,6 @@ impl Code {
                                 "Não deu para abrir {} como texto: {e}",
                                 self.relativo(&p).display()
                             )
-                        }
-                    }
-                }
-            }
-            // O text_editor fica com a altura toda do texto; a roda do mouse vira rolagem do scrollable de fora.
-            Msg::Editar(text_editor::Action::Scroll { lines }) => {
-                return scrollable::scroll_by(
-                    scrollable::Id::new("editor"),
-                    scrollable::AbsoluteOffset {
-                        x: 0.0,
-                        y: lines as f32 * ALTURA_LINHA,
-                    },
-                );
-            }
-            Msg::Editar(acao) => {
-                if let Some(aba) = self.abas.get_mut(self.ativa) {
-                    let editou = acao.is_edit();
-                    let edicao_simples = matches!(
-                        &acao,
-                        text_editor::Action::Edit(
-                            text_editor::Edit::Insert(_)
-                                | text_editor::Edit::Backspace
-                                | text_editor::Edit::Delete
-                        )
-                    );
-                    if editou {
-                        aba.desfazer
-                            .antes_de_editar(&aba.conteudo, edicao::agrupa(&acao));
-                    }
-                    aba.conteudo.perform(acao);
-                    if editou {
-                        aba.sujo = true;
-                        if edicao_simples {
-                            // A largura pode diminuir na próxima edição em bloco; digitar só
-                            // precisa ampliar a área para a linha que acabou de mudar.
-                            let (linha, _) = aba.conteudo.cursor_position();
-                            if let Some(texto) = aba.conteudo.line(linha) {
-                                aba.maior = aba.maior.max(maior_linha(&texto));
-                            }
-                        } else {
-                            aba.maior = maior_linha(&aba.conteudo.text());
                         }
                     }
                 }
@@ -988,9 +1032,9 @@ impl Code {
             }
             Msg::SalvarTudo => {
                 let mut erros = Vec::new();
-                for aba in self.abas.iter_mut().filter(|a| a.sujo) {
+                for aba in self.abas.iter_mut().filter(|a| a.sujo()) {
                     match std::fs::write(&aba.caminho, aba.conteudo.text()) {
-                        Ok(()) => aba.sujo = false,
+                        Ok(()) => aba.salvo = aba.conteudo.version(),
                         Err(e) => erros.push(format!("{}: {e}", aba.caminho.display())),
                     }
                 }
@@ -1004,15 +1048,17 @@ impl Code {
                 if let Some(aba) = self.abas.get_mut(self.ativa) {
                     match std::fs::write(&aba.caminho, aba.conteudo.text()) {
                         Ok(()) => {
-                            aba.sujo = false;
+                            aba.salvo = aba.conteudo.version();
                             self.aviso.clear();
                         }
                         Err(e) => self.aviso = format!("Não deu para salvar: {e}"),
                     }
                 }
             }
-            Msg::Pedido(t) => self.chat.pedido = text_editor::Content::with_text(&t),
-            Msg::EditarPedido(a) => self.chat.pedido.perform(a),
+            Msg::Pedido(t) => {
+                self.chat.pedido = Content::with_text(&t);
+                return Task::focus("pedido");
+            }
             Msg::Anexar => {
                 return Task::perform(
                     rfd::AsyncFileDialog::new()
@@ -1052,22 +1098,31 @@ impl Code {
             }
             Msg::Enviar => {
                 let pedido = self.chat.pedido.text().trim().to_string();
-                if (pedido.is_empty() && self.chat.imagens.is_empty()) || self.chat.ocupado {
+                let vazio = self.chat.imagens.is_empty() && self.chat.trechos.is_empty();
+                if (pedido.is_empty() && vazio) || self.chat.ocupado {
                     return Task::none();
                 }
                 let imagens: Vec<_> = self.chat.imagens.drain(..).collect();
                 let blocos: Vec<_> = imagens.iter().map(|(_, b)| b.clone()).collect();
-                let linha =
-                    agente::mensagem_com_imagens(&format!("{pedido}{}", self.contexto()), &blocos);
+                let trechos: Vec<_> = self.chat.trechos.drain(..).collect();
+                let codigo: String = trechos.iter().map(|(_, t)| format!("\n\n{t}")).collect();
+                let linha = agente::mensagem_com_imagens(
+                    &format!("{pedido}{codigo}{}", self.contexto()),
+                    &blocos,
+                );
                 let mut mostrado = pedido;
+                for (rotulo, _) in &trechos {
+                    mostrado.push_str(&format!("\n[{rotulo}]"));
+                }
                 for (nome, _) in &imagens {
                     mostrado.push_str(&format!("\n[imagem: {nome}]"));
                 }
                 self.chat.itens.push(Item::Eu(mostrado.trim_start().into()));
-                self.chat.pedido = text_editor::Content::new();
+                self.chat.pedido = Content::new();
                 self.chat.ocupado = true;
                 self.chat.ligado = true;
                 self.enviar(linha);
+                return Self::rolar_chat();
             }
             Msg::Parar => self.controle(serde_json::json!({"subtype": "interrupt"})),
             Msg::NovaConversa => {
@@ -1106,7 +1161,11 @@ impl Code {
                 self.trocar_chat(id);
                 let tarefa = self.update(Msg::Agente(evento));
                 self.trocar_chat(anterior);
-                return tarefa;
+                return if id == anterior {
+                    Task::batch([tarefa, Self::rolar_chat()])
+                } else {
+                    tarefa
+                };
             }
             Msg::Detalhes => self.chat.detalhes = !self.chat.detalhes,
             Msg::Historico => {
@@ -1198,34 +1257,34 @@ impl Code {
                     return self.update(Msg::Responder(i, r));
                 }
             }
-            Msg::Copiar(t) => return iced::clipboard::write(t),
+            Msg::Copiar(t) => return Task::write_clipboard(t),
             Msg::FocarTerminal => {
                 self.terminal_aberto = true;
-                if let Some(t) = self.terminais.ativo() {
-                    return iced_term::TerminalView::focus(t.widget_id());
+                if self.terminais.ativo().is_some() {
+                    return self.terminais.focar();
                 }
                 return self.update(Msg::NovoTerminal);
             }
             Msg::NovoTerminal => {
                 self.terminal_aberto = true;
                 match self.terminais.novo(&self.arvore.raiz, None) {
-                    Ok(_) => return self.focar_terminal(),
+                    Ok(_) => return self.terminais.focar(),
                     Err(e) => self.aviso = e,
                 }
             }
             Msg::FecharTerminal(id) => self.terminais.fechar(id),
             Msg::TrocarTerminal(i) => {
                 self.terminais.ativa = i;
-                return self.focar_terminal();
+                return self.terminais.focar();
             }
-            Msg::Term(ev) => self.terminais.tratar(ev),
+            Msg::Term(id, ev) => self.terminais.tratar(id, ev),
             Msg::RodarProjeto => {
                 let arquivo = self.aba().map(|a| a.caminho.clone());
                 match execucao::comando_do_projeto(&self.arvore.raiz, arquivo.as_deref()) {
                     Some(cmd) => {
                         self.terminal_aberto = true;
                         match self.terminais.rodar(&self.arvore.raiz, &cmd) {
-                            Ok(_) => return self.focar_terminal(),
+                            Ok(_) => return self.terminais.focar(),
                             Err(e) => self.aviso = e,
                         }
                     }
@@ -1235,66 +1294,46 @@ impl Code {
                     }
                 }
             }
-            Msg::Janela(id) => {
-                self.janela = id;
-                if std::env::var_os("FEATHERCODE_CAPTURAR").is_some() {
-                    return Task::perform(
-                        tokio::time::sleep(std::time::Duration::from_millis(900)),
-                        |_| Msg::Capturar,
-                    );
-                }
-            }
             Msg::Link(url) => {
                 #[cfg(target_os = "linux")]
-                let abrir = std::process::Command::new("xdg-open")
-                    .arg(url.as_str())
-                    .spawn();
+                let abrir = std::process::Command::new("xdg-open").arg(&url).spawn();
                 #[cfg(target_os = "windows")]
                 let abrir = std::process::Command::new("cmd")
-                    .args(["/C", "start", "", url.as_str()])
+                    .args(["/C", "start", "", &url])
                     .spawn();
                 #[cfg(target_os = "macos")]
-                let abrir = std::process::Command::new("open").arg(url.as_str()).spawn();
+                let abrir = std::process::Command::new("open").arg(&url).spawn();
                 if let Err(e) = abrir {
                     self.aviso = format!("Não deu para abrir o link: {e}");
                 }
             }
+            // A foto sai do mesmo desenho da janela, sem passar pela tela.
             Msg::Capturar => {
-                return self
-                    .janela
-                    .map_or_else(Task::none, |id| window::screenshot(id).map(Msg::Capturado))
-            }
-            Msg::Capturado(foto) => {
                 if let Some(caminho) = std::env::var_os("FEATHERCODE_CAPTURAR") {
-                    if let Err(e) = image::save_buffer(
-                        &caminho,
-                        &foto.bytes,
-                        foto.size.width,
-                        foto.size.height,
-                        image::ColorType::Rgba8,
-                    ) {
+                    let png = pelicano::capture(
+                        &self.view(),
+                        self.tamanho,
+                        1.0,
+                        &tema::tema(),
+                        &mut pelicano::Renderer::new(),
+                        None,
+                    );
+                    if let Err(e) = std::fs::write(&caminho, png) {
                         eprintln!("[captura] {e}");
                     }
                 }
-                return self.janela.map_or_else(Task::none, window::close);
+                return Task::window(WindowCmd::Exit);
             }
             Msg::Tamanho(s) => self.tamanho = s,
             Msg::Arrastar => {
-                let Some(id) = self.janela else {
-                    return Task::none();
-                };
                 return feather_ui::janelas::arrastar_ou_maximizar(
-                    id,
+                    WindowId::MAIN,
                     &mut self.ultimo_clique_barra,
                 );
             }
-            Msg::Minimizar => {
-                return self
-                    .janela
-                    .map_or_else(Task::none, |id| window::minimize(id, true))
-            }
-            Msg::Maximizar => return self.janela.map_or_else(Task::none, window::toggle_maximize),
-            Msg::Fechar => return self.janela.map_or_else(Task::none, window::close),
+            Msg::Minimizar => return Task::window(WindowCmd::Minimize),
+            Msg::Maximizar => return Task::window(WindowCmd::ToggleMaximize),
+            Msg::Fechar => return Task::window(WindowCmd::Close),
         }
         Task::none()
     }
@@ -1312,17 +1351,17 @@ impl Code {
                         text("Abrir pasta").size(12)
                     ]
                     .spacing(6)
-                    .align_y(Alignment::Center),
+                    .align(Align::Center),
                     Msg::AbrirPasta
                 ),
             ]
             .spacing(10)
-            .align_y(Alignment::Center),
+            .align(Align::Center),
         )
         .padding([0, 12])
-        .width(Length::Fill)
+        .width(Length::FILL)
         .height(cromo::BARRA_ALTURA)
-        .align_y(Alignment::Center)
+        .align_y(Align::Center)
         // Mesmo fundo dos vãos entre os cartões: topo, trilho e rodapé formam a moldura escura.
         .style(|_| fundo(COR_FUNDO_JANELA()));
         let barra = cromo::barra_integrada(
@@ -1348,8 +1387,25 @@ impl Code {
         } else {
             self.area_de_trabalho(barra)
         };
-        let janela = match self.menu_aberto_view() {
-            Some(menu) => stack![janela, menu].into(),
+        // Durante o arraste, uma camada na janela toda segue o mouse até soltar.
+        let janela = match self.arrastando {
+            Some(d) => stack![
+                janela,
+                mouse_area(Space::new(Length::FILL, Length::FILL))
+                    .on_move(Msg::Mover)
+                    .on_release(Msg::Redimensionar(None))
+                    .cursor_icon(cursor_da_divisa(d))
+            ]
+            .width(Length::FILL)
+            .height(Length::FILL)
+            .into(),
+            None => janela,
+        };
+        let janela = match self.menu_aberto_view().or_else(|| self.menu_contexto_view()) {
+            Some(menu) => stack![janela, menu]
+                .width(Length::FILL)
+                .height(Length::FILL)
+                .into(),
             None => janela,
         };
         cromo::moldura_janela(janela)
@@ -1364,32 +1420,48 @@ impl Code {
                     Some(d) => self.diff_view(d),
                     None => self.editor_view(),
                 }
-            ],
+            ]
+            .height(Length::FILL),
             COR_PAINEL(),
+            Length::FILL,
         );
-        let mut centro = column![editor].spacing(VAO).width(Length::Fill);
+        // Os vãos entre os cartões são as alças de arrastar.
+        let mut centro = column![editor]
+            .width(Length::FILL)
+            .height(Length::FILL);
         if self.terminal_aberto {
-            centro = centro.push(cartao(self.terminal_view(), cor_terminal()));
+            centro = centro
+                .push(alca(Divisa::Terminal))
+                .push(cartao(self.terminal_view(), cor_terminal(), Length::Shrink));
         }
-        let mut cartoes = row![].spacing(VAO).height(Length::Fill);
+        let mut cartoes = row![].height(Length::FILL);
         if let Some(lado) = self.lado_view() {
-            cartoes = cartoes.push(cartao(lado, COR_PAINEL_FAIXA()));
+            cartoes = cartoes
+                .push(cartao(lado, COR_PAINEL_FAIXA(), Length::FILL))
+                .push(alca(Divisa::Lado));
         }
         cartoes = cartoes.push(centro);
         if self.agente_aberto {
-            cartoes = cartoes.push(cartao(self.agente_view(), COR_PAINEL_FAIXA()));
+            cartoes = cartoes
+                .push(alca(Divisa::Agente))
+                .push(cartao(self.agente_view(), COR_PAINEL_FAIXA(), Length::FILL));
         }
         let meio = row![
             self.trilho_view(),
-            container(cartoes).padding(iced::Padding {
-                top: 0.0,
-                right: VAO,
-                bottom: VAO,
-                left: 0.0,
-            })
+            container(cartoes)
+                .padding(Padding {
+                    top: 0.0,
+                    right: VAO,
+                    bottom: VAO,
+                    left: 0.0,
+                })
+                .width(Length::FILL)
+                .height(Length::FILL)
         ]
-        .height(Length::Fill);
-        column![barra, meio, self.status_view()].into()
+        .height(Length::FILL);
+        column![barra, meio, self.status_view()]
+            .height(Length::FILL)
+            .into()
     }
 
     fn arvore_view(&self) -> Element<'_, Msg> {
@@ -1411,7 +1483,7 @@ impl Code {
                 )
                 .into()
             } else {
-                Space::with_width(12).into()
+                Space::new(12.0, 0.0).into()
             };
             let ativo = aberto == Some(l.caminho.as_path());
             let msg = if l.pasta {
@@ -1421,15 +1493,16 @@ impl Code {
             };
             button(
                 row![
-                    Space::with_width(l.nivel as f32 * 14.0),
+                    Space::new(l.nivel as f32 * 14.0, 0.0),
                     seta,
-                    text(nome).size(13)
+                    text(nome).size(13).no_wrap()
                 ]
                 .spacing(4)
-                .align_y(Alignment::Center),
+                .width(Length::FILL)
+                .align(Align::Center),
             )
             .on_press(msg)
-            .width(Length::Fill)
+            .width(Length::FILL)
             .padding([3, 12])
             .style(move |_, s| item_lista(ativo, s, 0.0))
             .into()
@@ -1444,27 +1517,15 @@ impl Code {
         .size(11)
         .font(NEGRITO)
         .color(COR_TEXTO_MUTED());
-        let filtro = text_input("Procurar arquivo", &self.filtro)
-            .id(text_input::Id::new("filtro"))
+        let filtro = text_input("Procurar arquivo", self.filtro.as_str())
+            .id("filtro")
             .on_input(Msg::Filtro)
             .size(12)
             .padding([5, 8])
-            .style(|t, s| text_input::Style {
-                border: Border {
-                    color: if matches!(s, text_input::Status::Focused) {
-                        COR_AZUL_ACENTO()
-                    } else {
-                        COR_BORDA()
-                    },
-                    width: 1.0,
-                    radius: 6.0.into(),
-                },
-                background: COR_PAINEL().into(),
-                ..campo_sem_borda(t, s)
-            });
+            .style(campo(COR_PAINEL()));
         // Com o filtro, a lista vira os arquivos de todas as pastas cujo nome contém o texto.
         let lista: Element<Msg> = if self.filtro.trim().is_empty() {
-            Column::with_children(linhas).into()
+            column(linhas).width(Length::FILL).into()
         } else {
             let termo = self.filtro.trim().to_lowercase();
             let achados = self.todos_arquivos.iter().filter(|p| {
@@ -1487,9 +1548,10 @@ impl Code {
                     button(column![
                         text(nome).size(13),
                         text(pai).size(11).color(COR_TEXTO_MUTED())
-                    ])
+                    ]
+                    .width(Length::FILL))
                     .on_press(Msg::AbrirArquivo(p.clone()))
-                    .width(Length::Fill)
+                    .width(Length::FILL)
                     .padding([3, 12])
                     .style(move |_, s| item_lista(ativo, s, 0.0))
                     .into()
@@ -1504,38 +1566,39 @@ impl Code {
                 .padding([4, 12])
                 .into()
             } else {
-                Column::with_children(itens).into()
+                column(itens).width(Length::FILL).into()
             }
         };
         container(column![
             container(
                 column![
                     row![
-                        container(titulo).width(Length::Fill),
+                        container(titulo).width(Length::FILL),
                         tooltip(
                             botao_icone("refresh", Msg::AtualizarArvore),
                             "Atualizar arquivos",
-                            tooltip::Position::Bottom
-                        ),
+                            TooltipPosition::Bottom
+                        )
+                        .style(tema::estilo_dica),
                         tooltip(
                             botao_icone("chevron-up", Msg::RecolherArvore),
                             "Recolher tudo",
-                            tooltip::Position::Bottom
-                        ),
+                            TooltipPosition::Bottom
+                        )
+                        .style(tema::estilo_dica),
                     ]
                     .spacing(4)
-                    .align_y(Alignment::Center),
+                    .align(Align::Center),
                     filtro
                 ]
                 .spacing(8)
             )
-            .padding([10, 12]),
-            tema::rolagem(lista)
-                .height(Length::Fill)
-                .style(rolagem_discreta)
+            .padding([10, 12])
+            .width(Length::FILL),
+            rolagem(lista).height(Length::FILL)
         ])
-        .width(LARGURA_ARVORE)
-        .height(Length::Fill)
+        .width(self.largura_lado())
+        .height(Length::FILL)
         .style(|_| fundo(COR_PAINEL_FAIXA()))
         .into()
     }
@@ -1549,7 +1612,7 @@ impl Code {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
             let fechar = button(
-                text(if a.sujo { "●" } else { "×" })
+                text(if a.sujo() { "●" } else { "×" })
                     .size(13)
                     .color(COR_TEXTO_MUTED()),
             )
@@ -1557,22 +1620,22 @@ impl Code {
             .padding([0, 4])
             .style(|_, s| item_lista(false, s, 3.0));
             let aba = button(
-                row![text(nome).size(13), fechar]
+                row![text(nome).size(13).no_wrap(), fechar]
                     .spacing(8)
-                    .align_y(Alignment::Center),
+                    .align(Align::Center),
             )
             .on_press(Msg::TrocarAba(i))
-            .padding(iced::Padding {
+            .padding(Padding {
                 top: 6.0,
                 right: 8.0,
                 bottom: 6.0,
                 left: 14.0,
             })
-            .height(Length::Fill)
+            .height(Length::FILL)
             .style(move |_, s| aba_estilo(ativa, s));
             // O traço embaixo marca a aba ativa.
-            let traco = container(Space::with_height(2))
-                .width(Length::Fill)
+            let traco = container(Space::new(0.0, 2.0))
+                .width(Length::FILL)
                 .style(move |_| {
                     fundo(if ativa {
                         COR_AZUL_ACENTO()
@@ -1580,24 +1643,30 @@ impl Code {
                         Color::TRANSPARENT
                     })
                 });
-            stack![aba, column![Space::with_height(Length::Fill), traco]].into()
+            stack![
+                aba,
+                column![Space::new(0.0, Length::FILL), traco].height(Length::FILL)
+            ]
+            .height(Length::FILL)
+            .into()
         });
         let arquivo = self.aba().map(|a| a.caminho.as_path());
         let rodar: Element<Msg> =
             if let Some(cmd) = execucao::comando_do_projeto(&self.arvore.raiz, arquivo) {
                 botao_rodar("Rodar", VERDE, Msg::RodarProjeto, format!("{cmd}  (F5)"))
             } else {
-                Space::with_width(0).into()
+                Space::new(0.0, 0.0).into()
             };
         container(
             row![
-                row(abas).height(Length::Fill),
+                row(abas).height(Length::FILL),
                 horizontal_space(),
                 container(rodar).padding([0, 10])
             ]
-            .align_y(Alignment::Center),
+            .height(Length::FILL)
+            .align(Align::Center),
         )
-        .width(Length::Fill)
+        .width(Length::FILL)
         .height(ALTURA_ABAS)
         .into()
     }
@@ -1614,127 +1683,61 @@ impl Code {
                     .color(COR_TEXTO_MUTED()),
             ]
             .spacing(8)
-            .align_x(Alignment::Center);
+            .align(Align::Center);
             return container(vazio)
-                .center(Length::Fill)
+                .center()
+                .width(Length::FILL)
+                .height(Length::FILL)
                 .style(|_| fundo(COR_PAINEL()))
                 .into();
         };
-        // Mesmo desenho do editor de macros do FeatherSheet: o text_editor do Iced 0.13 não expõe a
-        // rolagem, então ele ganha a altura do texto e um scrollable nosso rola a calha e o código juntos.
-        let total = aba.conteudo.line_count().max(1);
-        let (linha_cursor, _) = aba.conteudo.cursor_position();
-        let calha_px = total.to_string().len().max(2) as f32 * LARGURA_CARACTERE + 28.0;
-        let visivel_x = self.tamanho.width
-            - paineis::LARGURA_TRILHO
-            - self.largura_lado()
-            - if self.agente_aberto {
-                LARGURA_AGENTE
-            } else {
-                0.0
-            }
-            - calha_px
-            - 6.0
-            - 4.0 * VAO;
-        let visivel_y = self.tamanho.height
-            - cromo::BARRA_ALTURA
-            - ALTURA_ABAS
-            - if self.terminal_aberto {
-                ALTURA_TERMINAL
-            } else {
-                0.0
-            }
-            - ALTURA_STATUS
-            - 4.0
-            - 3.0 * VAO;
-        let largura = (aba.maior as f32 * LARGURA_CARACTERE + 2.0 * MARGEM_H + 32.0).max(visivel_x);
-        let altura = (total as f32 * ALTURA_LINHA + 2.0 * MARGEM_V).max(visivel_y);
         let extensao = aba
             .caminho
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("txt");
-        let cores = self.tema_codigo();
-        let editor = text_editor(&aba.conteudo)
-            .on_action(Msg::Editar)
-            .key_binding(|k| {
-                use text_editor::Binding;
-                if k.status != text_editor::Status::Focused {
-                    return None;
-                }
-                match k.key.as_ref() {
-                    keyboard::Key::Named(keyboard::key::Named::Tab) => {
-                        Some(Binding::Custom(Msg::Recuar(!k.modifiers.shift())))
+        // O editor do pelicano rola, numera as linhas e desfaz sozinho; o app só cuida dos atalhos.
+        let mut editor = text_editor(&aba.conteudo)
+            .id("editor")
+            // O chat também é um editor: sem clique, nenhum dos dois pega a digitação.
+            .idle_focus(false)
+            .on_key(|k, m| {
+                let ctrl = m.control_key() || m.super_key();
+                match k {
+                    Key::Named(NamedKey::Tab) if !ctrl => Some(Msg::Recuar(!m.shift_key())),
+                    Key::Character(c) if ctrl && matches!(c.as_str(), ";" | "/") => {
+                        Some(Msg::Comentar)
                     }
-                    keyboard::Key::Character(";" | "/") if k.modifiers.command() => {
-                        Some(Binding::Custom(Msg::Comentar))
-                    }
-                    keyboard::Key::Character("z" | "Z") if k.modifiers.command() => {
-                        Some(Binding::Custom(Msg::Desfazer(k.modifiers.shift())))
-                    }
-                    keyboard::Key::Character("y" | "Y") if k.modifiers.command() => {
-                        Some(Binding::Custom(Msg::Desfazer(true)))
-                    }
-                    _ => Binding::from_key_press(k),
+                    _ => None,
                 }
             })
             .font(MONO)
             .size(TAMANHO_FONTE)
-            .line_height(LineHeight::Absolute(ALTURA_LINHA.into()))
-            .wrapping(Wrapping::None)
-            .width(largura)
-            .height(altura)
-            .padding(iced::Padding {
+            .line_height(ALTURA_LINHA)
+            .wrap(false)
+            .line_numbers(true)
+            .padding(Padding {
                 top: MARGEM_V,
                 bottom: MARGEM_V,
-                left: MARGEM_H,
+                left: 4.0,
                 right: MARGEM_H,
             })
-            .highlight(extensao, cores)
-            .style(|_, _| text_editor::Style {
-                background: Background::Color(COR_PAINEL()),
-                border: Border::default(),
-                icon: COR_TEXTO_MUTED(),
-                placeholder: COR_TEXTO_MUTED(),
-                value: COR_TEXTO(),
-                selection: COR_AZUL_FUNDO(),
-            });
-        // Linha do cursor: faixa por cima do texto, um pouco mais clara no tema escuro e mais
-        // escura no claro (a cor do texto, quase transparente, faz as duas coisas). O editor fica
-        // na camada de baixo: numa camada de cima do stack, dentro do scrollable, o texto some.
-        let faixa = column![
-            Space::with_height(MARGEM_V + linha_cursor as f32 * ALTURA_LINHA),
-            container(Space::new(Length::Fill, ALTURA_LINHA))
-                .width(Length::Fill)
-                .style(|_| fundo(COR_TEXTO().scale_alpha(0.05)))
-        ]
-        .width(largura);
-        let listras = Element::new(LinhasAlternadas {
-            total,
-            habilitado: self.config.linhas_alternadas,
-            tamanho: Size::new(largura, altura),
-        });
-        let editor = stack![editor, listras, faixa];
-        let horizontal = scrollable(editor)
-            .style(rolagem_discreta)
-            .direction(scrollable::Direction::Horizontal(
-                scrollable::Scrollbar::new().width(6).scroller_width(6),
-            ))
-            .width(Length::Fill);
-        let separador = container(Space::new(1, altura)).style(|_| fundo(COR_BORDA()));
-        let conteudo = row![
-            calha(total, linha_cursor + 1, calha_px, altura),
-            separador,
-            horizontal
-        ];
-        container(
-            tema::rolagem(conteudo)
-                .id(scrollable::Id::new("editor"))
-                .height(Length::Fill)
-                .width(Length::Fill)
-                .style(rolagem_discreta),
+            .highlight(extensao, self.tema_codigo())
+            // Linha do cursor: um pouco mais clara no tema escuro e mais escura no claro (a cor
+            // do texto, quase transparente, faz as duas coisas).
+            .current_line(COR_TEXTO().alpha(0.05))
+            .style(|_, _| Style::default().background(COR_PAINEL()).text_color(COR_TEXTO()));
+        if self.config.linhas_alternadas {
+            editor = editor.stripes(COR_TEXTO().alpha(ALFA_LISTRAS));
+        }
+        // O editor do pelicano não usa o botão direito: ele chega aqui e abre o menu.
+        mouse_area(
+            container(editor)
+                .width(Length::FILL)
+                .height(Length::FILL)
+                .style(|_| fundo(COR_PAINEL())),
         )
-        .style(|_| fundo(COR_PAINEL()))
+        .on_right_press_at(|p| Msg::MenuContexto(Some(p)))
         .into()
     }
 
@@ -1769,17 +1772,18 @@ impl Code {
                         text("Abrir arquivo").size(12)
                     ]
                     .spacing(6)
-                    .align_y(Alignment::Center),
+                    .align(Align::Center),
                     Msg::AbrirArquivo(d.caminho.clone()),
                 ),
                 botao_icone("x", Msg::FecharDiff),
             ]
             .spacing(10)
-            .align_y(Alignment::Center),
+            .align(Align::Center),
         )
         .padding([0, 12])
-        .height(32)
-        .align_y(Alignment::Center)
+        .width(Length::FILL)
+        .height(32.0)
+        .align_y(Align::Center)
         .style(|_| fundo(COR_CROMO_2()));
         let numero = |n: Option<usize>| {
             container(
@@ -1788,15 +1792,15 @@ impl Code {
                     .font(MONO)
                     .color(COR_TEXTO_MUTED()),
             )
-            .width(44)
-            .align_x(Alignment::End)
+            .width(44.0)
+            .align_x(Align::End)
         };
-        let mut lista = Column::new();
+        let mut lista = column![].width(Length::FILL);
         for l in d.linhas.iter().take(MAX) {
             let (fundo_linha, sinal, cor_sinal) = match l.tipo {
-                '+' => (VERDE.scale_alpha(0.16), "+", VERDE),
-                '-' => (COR_ERRO().scale_alpha(0.16), "−", COR_ERRO()),
-                '@' => (COR_AZUL_ACENTO().scale_alpha(0.10), "", COR_TEXTO_MUTED()),
+                '+' => (VERDE.alpha(0.16), "+", VERDE),
+                '-' => (COR_ERRO().alpha(0.16), "−", COR_ERRO()),
+                '@' => (COR_AZUL_ACENTO().alpha(0.10), "", COR_TEXTO_MUTED()),
                 _ => (Color::TRANSPARENT, "", COR_TEXTO_MUTED()),
             };
             let corpo: Element<Msg> = if l.tipo == '@' {
@@ -1808,12 +1812,13 @@ impl Code {
                 .size(TAMANHO_FONTE - 1.0)
                 .font(MONO)
                 .color(COR_TEXTO_MUTED())
+                .no_wrap()
                 .into()
             } else {
-                text(&l.texto)
+                text(l.texto.as_str())
                     .size(TAMANHO_FONTE)
                     .font(MONO)
-                    .wrapping(Wrapping::None)
+                    .no_wrap()
                     .into()
             };
             lista = lista.push(
@@ -1822,16 +1827,17 @@ impl Code {
                         numero(l.antes),
                         numero(l.depois),
                         container(text(sinal).size(TAMANHO_FONTE).font(MONO).color(cor_sinal))
-                            .width(22)
-                            .align_x(Alignment::Center),
+                            .width(22.0)
+                            .align_x(Align::Center),
                         corpo
                     ]
                     .spacing(6)
-                    .align_y(Alignment::Center),
+                    .align(Align::Center),
                 )
-                .width(Length::Fill)
+                .width(Length::FILL)
                 .height(ALTURA_LINHA)
-                .align_y(Alignment::Center)
+                .align_y(Align::Center)
+                .clip(true)
                 .style(move |_| fundo(fundo_linha)),
             );
         }
@@ -1841,7 +1847,9 @@ impl Code {
                     .size(13)
                     .color(COR_TEXTO_MUTED()),
             )
-            .center(Length::Fill)
+            .center()
+            .width(Length::FILL)
+            .height(Length::FILL)
             .into()
         } else {
             if d.linhas.len() > MAX {
@@ -1854,19 +1862,21 @@ impl Code {
                     .padding(10),
                 );
             }
-            tema::rolagem(lista.padding([6, 0]))
-                .height(Length::Fill)
-                .width(Length::Fill)
-                .style(rolagem_discreta)
+            rolagem(lista.padding([6, 0]))
+                .height(Length::FILL)
+                .width(Length::FILL)
                 .into()
         };
         column![
             cab,
             linha_horizontal(),
-            container(corpo).style(|_| fundo(COR_PAINEL()))
+            container(corpo)
+                .width(Length::FILL)
+                .height(Length::FILL)
+                .style(|_| fundo(COR_PAINEL()))
         ]
-        .width(Length::Fill)
-        .height(Length::Fill)
+        .width(Length::FILL)
+        .height(Length::FILL)
         .into()
     }
 
@@ -1916,34 +1926,35 @@ impl Code {
             .unwrap_or_else(|| "Nova conversa".into());
         let topo = container(
             row![
-                text(titulo).size(13).font(NEGRITO),
+                text(titulo).size(13).font(NEGRITO).ellipsis(),
                 horizontal_space(),
                 // O histórico lê as sessões gravadas pelo Claude Code; os outros guardam do jeito deles.
                 if self.chat.provedor == agente::Provedor::Claude {
                     botao_icone("history", Msg::Historico)
                 } else {
-                    Space::with_width(0).into()
+                    Space::new(0.0, 0.0).into()
                 },
                 botao_icone("info-circle", Msg::Detalhes),
                 botao_icone("plus", Msg::NovaConversa),
             ]
             .spacing(2)
-            .align_y(Alignment::Center),
+            .align(Align::Center),
         )
-        .padding(iced::Padding {
+        .padding(Padding {
             top: 0.0,
             right: 8.0,
             bottom: 0.0,
             left: 14.0,
         })
+        .width(Length::FILL)
         .height(ALTURA_ABAS)
-        .align_y(Alignment::Center);
+        .align_y(Align::Center);
 
         let mut chats: Vec<&Chat> = std::iter::once(&self.chat)
             .chain(self.outros_chats.iter())
             .collect();
         chats.sort_by_key(|c| c.conversa);
-        let mut abas_chat = iced::widget::Row::new().spacing(4);
+        let mut abas_chat = row![].spacing(4);
         for chat in chats {
             let pendente = chat.itens.iter().any(|i| {
                 matches!(
@@ -1976,9 +1987,9 @@ impl Code {
                 .style(|_, s| item_lista(false, s, 3.0));
             abas_chat = abas_chat.push(
                 button(
-                    row![text(format!("{titulo} · {estado}")).size(11), fechar]
+                    row![text(format!("{titulo} · {estado}")).size(11).no_wrap(), fechar]
                         .spacing(6)
-                        .align_y(Alignment::Center),
+                        .align(Align::Center),
                 )
                 .on_press(Msg::TrocarChat(chat.conversa))
                 .padding([2, 8])
@@ -1987,17 +1998,20 @@ impl Code {
         }
         // Com uma conversa só, a barra de abas não aparece.
         let abas_chat: Element<Msg> = if self.outros_chats.is_empty() {
-            Space::with_height(0).into()
+            Space::new(0.0, 0.0).into()
         } else {
             container(
-                scrollable(abas_chat).direction(scrollable::Direction::Horizontal(
-                    scrollable::Scrollbar::new().width(3).scroller_width(3),
-                )),
+                scrollable(abas_chat)
+                    .direction(Direction::Horizontal)
+                    .scrollbar_width(3.0)
+                    .scrollbar_color(COR_BORDA())
+                    .width(Length::FILL),
             )
             .padding([4, 8])
+            .width(Length::FILL)
             .into()
         };
-        let mut corpo = Column::new().spacing(12).padding([14, 14]);
+        let mut corpo = column![].spacing(12).padding([14, 14]).width(Length::FILL);
         if self.chat.detalhes {
             corpo = corpo.push(self.detalhes_view());
         }
@@ -2011,7 +2025,8 @@ impl Code {
                         .size(12)
                         .color(COR_TEXTO_MUTED()),
                 ]
-                .spacing(6),
+                .spacing(6)
+                .width(Length::FILL),
             );
         }
         // Passos seguidos de ferramenta ficam juntos numa linha do tempo, com o traço à esquerda.
@@ -2050,177 +2065,176 @@ impl Code {
 
         let chip: Element<Msg> = match self.aba() {
             Some(a) => {
-                let (l, _) = a.conteudo.cursor_position();
+                let (l, _) = a.conteudo.cursor();
                 container(
-                    text(format!("{}:{}", self.relativo(&a.caminho).display(), l + 1))
+                    text(format!("{}:{l}", self.relativo(&a.caminho).display()))
                         .font(MONO)
                         .size(11)
-                        .color(COR_TEXTO_MUTED()),
+                        .color(COR_TEXTO_MUTED())
+                        .ellipsis(),
                 )
                 .padding([1, 6])
-                .style(|_| container::Style {
-                    border: Border {
-                        color: COR_BORDA(),
-                        width: 1.0,
-                        radius: 4.0.into(),
-                    },
-                    ..Default::default()
-                })
+                .style(|_| Style::default().border(Border::rounded(4.0).color(COR_BORDA(), 1.0)))
                 .into()
             }
-            None => Space::with_height(0).into(),
+            None => Space::new(0.0, 0.0).into(),
         };
         let acao = if self.chat.ocupado {
-            button(container(icone_traco("player-stop", 13.0)).center(22))
-                .on_press(Msg::Parar)
-                .padding(0)
-                .style(|_, s| item_lista(false, s, 5.0))
+            button(
+                container(icone_traco("player-stop", 13.0))
+                    .center()
+                    .width(22.0)
+                    .height(22.0),
+            )
+            .on_press(Msg::Parar)
+            .padding(0)
+            .style(|_, s| item_lista(false, s, 5.0))
         } else {
-            button(container(text("↑").size(14).color(COR_PAINEL())).center(22))
-                .on_press(Msg::Enviar)
-                .padding(0)
-                .style(botao_enviar)
+            button(
+                container(text("↑").size(14).color(COR_PAINEL()))
+                    .center()
+                    .width(22.0)
+                    .height(22.0),
+            )
+            .on_press(Msg::Enviar)
+            .padding(0)
+            .style(botao_enviar)
         };
         let clipe: Element<Msg> = if self.chat.provedor == agente::Provedor::Claude {
             tooltip(
                 botao_icone("photo", Msg::Anexar),
-                container(text("Mandar imagem (ou solte o arquivo na janela)").size(11))
-                    .padding([3, 8])
-                    .style(tema::estilo_dica),
-                tooltip::Position::Top,
+                "Mandar imagem (ou solte o arquivo na janela)",
+                TooltipPosition::Top,
             )
+            .padding([3, 8])
+            .style(tema::estilo_dica)
             .into()
         } else {
-            Space::with_width(0).into()
+            Space::new(0.0, 0.0).into()
         };
-        let rodape = row![
-            self.bolinha(),
-            clipe,
-            pick_list(
-                self.agentes_instalados(),
-                Some(self.chat.provedor),
-                Msg::Provedor
-            )
-            .text_size(12)
+        let agente = pick_list(&self.agentes, Some(self.chat.provedor), Msg::Provedor)
+            .size(12)
             .padding([2, 4])
             .style(lista_sem_borda)
-            .menu_style(tema::estilo_menu_popup),
-            pick_list(Modo::TODOS, Some(self.chat.modo), Msg::Modo)
-                .text_size(12)
-                .padding([2, 4])
-                .style(lista_sem_borda)
-                .menu_style(tema::estilo_menu_popup),
-            horizontal_space(),
+            .handle_color(COR_TEXTO_MUTED());
+        let modo = pick_list(&Modo::TODOS, Some(self.chat.modo), Msg::Modo)
+            .size(12)
+            .padding([2, 4])
+            .style(lista_sem_borda)
+            .handle_color(COR_TEXTO_MUTED());
+        let fim = row![
             text(nome_modelo(&self.chat.info.modelo))
                 .size(12)
-                .color(COR_TEXTO_MUTED()),
+                .color(COR_TEXTO_MUTED())
+                .no_wrap(),
             self.anel(),
             acao,
         ]
         .spacing(4)
-        .align_y(Alignment::Center);
+        .align(Align::Center);
+        // Painel estreito (arrastado): os seletores sobem para uma linha própria, senão cobrem o botão.
+        let rodape: Element<Msg> = if self.largura_agente >= LARGURA_AGENTE {
+            row![self.bolinha(), clipe, agente, modo, horizontal_space(), fim]
+                .spacing(4)
+                .align(Align::Center)
+                .into()
+        } else {
+            column![
+                row![agente, modo].spacing(4).align(Align::Center),
+                row![self.bolinha(), clipe, horizontal_space(), fim]
+                    .spacing(4)
+                    .align(Align::Center),
+            ]
+            .spacing(4)
+            .width(Length::FILL)
+            .into()
+        };
+        // Cresce com o texto até umas 8 linhas; dali em diante rola por dentro.
+        let linhas = self.chat.pedido.line_count().clamp(1, 8) as f32;
+        let pedido = text_editor(&self.chat.pedido)
+            .id("pedido")
+            .idle_focus(false)
+            .placeholder("Peça uma mudança ou pergunte…")
+            // Enter manda; Shift+Enter cai no padrão, que é quebrar a linha.
+            .on_key(|k, m| {
+                (matches!(k, Key::Named(NamedKey::Enter)) && !m.shift_key()).then_some(Msg::Enviar)
+            })
+            .size(13.0)
+            .padding([6, 10])
+            .style(|_, _| Style::default().text_color(COR_TEXTO()));
         let entrada = container(column![
-            container(chip).padding(iced::Padding {
+            container(chip).padding(Padding {
                 top: 8.0,
                 right: 10.0,
                 bottom: 0.0,
                 left: 10.0
             }),
             self.anexos_view(),
-            text_editor(&self.chat.pedido)
-                .placeholder("Peça uma mudança ou pergunte…")
-                .on_action(Msg::EditarPedido)
-                // Enter manda; Shift+Enter cai no padrão, que é quebrar a linha.
-                .key_binding(|k| {
-                    if k.status == text_editor::Status::Focused
-                        && !k.modifiers.shift()
-                        && matches!(
-                            k.key.as_ref(),
-                            keyboard::Key::Named(keyboard::key::Named::Enter)
-                        )
-                    {
-                        return Some(text_editor::Binding::Custom(Msg::Enviar));
-                    }
-                    text_editor::Binding::from_key_press(k)
-                })
-                .size(13)
-                .padding([6, 10])
-                // Cresce com o texto até umas 8 linhas; dali em diante rola por dentro.
-                .height(if self.chat.pedido.line_count() > 8 {
-                    Length::Fixed(8.0 * 17.0 + 12.0)
-                } else {
-                    Length::Shrink
-                })
-                .style(editor_sem_borda),
+            container(pedido)
+                .width(Length::FILL)
+                .height(linhas * 19.0 + 12.0),
             linha_horizontal(),
-            container(rodape).padding([5, 8]),
+            container(rodape).padding([5, 8]).width(Length::FILL),
         ])
-        .style(|_| container::Style {
-            border: Border {
-                color: COR_BORDA(),
-                width: 1.0,
-                radius: 6.0.into(),
-            },
-            ..fundo(COR_PAINEL())
-        });
+        .width(Length::FILL)
+        .style(|_| fundo(COR_PAINEL()).border(Border::rounded(6.0).color(COR_BORDA(), 1.0)));
 
         container(column![
             topo,
             abas_chat,
             linha_horizontal(),
-            tema::rolagem(corpo)
-                .style(rolagem_discreta)
-                .anchor_bottom()
-                .height(Length::Fill),
-            container(entrada).padding(iced::Padding {
-                top: 0.0,
-                right: 10.0,
-                bottom: 10.0,
-                left: 10.0
-            }),
+            rolagem(corpo).id("chat").height(Length::FILL),
+            container(entrada)
+                .padding(Padding {
+                    top: 0.0,
+                    right: 10.0,
+                    bottom: 10.0,
+                    left: 10.0
+                })
+                .width(Length::FILL),
         ])
-        .width(LARGURA_AGENTE)
-        .height(Length::Fill)
+        .width(self.largura_agente)
+        .height(Length::FILL)
         .style(|_| fundo(COR_PAINEL_FAIXA()))
         .into()
     }
 
     /// Imagens anexadas ao próximo pedido, cada uma com o × para tirar.
-    fn anexos_view(&self) -> Element<'_, Msg> {
-        if self.chat.imagens.is_empty() {
-            return Space::with_height(0).into();
+    fn anexos_view<'a>(&'a self) -> Element<'a, Msg> {
+        if self.chat.imagens.is_empty() && self.chat.trechos.is_empty() {
+            return Space::new(0.0, 0.0).into();
         }
-        let chips = self.chat.imagens.iter().enumerate().map(|(i, (nome, _))| {
+        let chip = |icone: &str, nome: &'a str, tirar: Msg| -> Element<'a, Msg> {
             container(
                 row![
-                    icone_traco("photo", 12.0),
-                    text(nome).size(11),
+                    icone_traco(icone, 12.0),
+                    text(nome).size(11).font(MONO),
                     button(text("×").size(12).color(COR_TEXTO_MUTED()))
-                        .on_press(Msg::TirarImagem(i))
+                        .on_press(tirar)
                         .padding([0, 4])
                         .style(|_, s| item_lista(false, s, 3.0)),
                 ]
                 .spacing(4)
-                .align_y(Alignment::Center),
+                .align(Align::Center),
             )
             .padding([1, 6])
-            .style(|_| container::Style {
-                border: Border {
-                    color: COR_BORDA(),
-                    width: 1.0,
-                    radius: 4.0.into(),
-                },
-                ..Default::default()
-            })
+            .style(|_| Style::default().border(Border::rounded(4.0).color(COR_BORDA(), 1.0)))
             .into()
-        });
-        container(iced::widget::Row::with_children(chips).spacing(6).wrap())
-            .padding(iced::Padding {
+        };
+        let trechos = self.chat.trechos.iter().enumerate();
+        let imagens = self.chat.imagens.iter().enumerate();
+        let chips: Vec<Element<Msg>> = trechos
+            .map(|(i, (rotulo, _))| chip("code", rotulo, Msg::TirarTrecho(i)))
+            .chain(imagens.map(|(i, (nome, _))| chip("photo", nome, Msg::TirarImagem(i))))
+            .collect();
+        container(row(chips).spacing(6).wrap())
+            .padding(Padding {
                 top: 6.0,
                 right: 10.0,
                 bottom: 0.0,
                 left: 10.0,
             })
+            .width(Length::FILL)
             .into()
     }
 
@@ -2248,14 +2262,10 @@ impl Code {
 
     fn bolinha(&self) -> Element<'_, Msg> {
         let (cor, frase) = self.estado();
-        tooltip(
-            text("●").size(10).color(cor),
-            container(text(frase).size(11))
-                .padding([3, 8])
-                .style(tema::estilo_dica),
-            tooltip::Position::Top,
-        )
-        .into()
+        tooltip(text("●").size(10).color(cor), frase, TooltipPosition::Top)
+            .padding([3, 8])
+            .style(tema::estilo_dica)
+            .into()
     }
 
     /// Anel do contexto usado, como no app do Claude; a dica mostra contexto, sessão e semana.
@@ -2266,24 +2276,26 @@ impl Code {
         } else {
             0.0
         };
-        let desenho = iced::widget::canvas(Anel(fracao)).width(16).height(16);
-        let dica: Element<Msg> = if usados == 0 && self.chat.uso.0.is_none() {
-            text("O uso aparece depois da primeira resposta.")
-                .size(11)
-                .into()
+        let desenho = canvas(16.0, 16.0, move |r, area, _| anel(r, area, fracao));
+        // shortcut: a dica do pelicano é só texto; as barras de uso ficam no painel de detalhes (ⓘ).
+        let dica = if usados == 0 && self.chat.uso.0.is_none() {
+            "O uso aparece depois da primeira resposta.".to_string()
         } else {
-            container(self.barras_view()).width(240).into()
+            self.usos()
+                .into_iter()
+                .map(|(rotulo, _, valor)| format!("{rotulo}: {valor}"))
+                .collect::<Vec<_>>()
+                .join("\n")
         };
-        tooltip(
-            desenho,
-            container(dica).padding([8, 10]).style(tema::estilo_dica),
-            tooltip::Position::Top,
-        )
-        .into()
+        tooltip(desenho, dica, TooltipPosition::Top)
+            .padding([8, 10])
+            .style(tema::estilo_dica)
+            .into()
     }
 
-    fn barras_view(&self) -> Element<'_, Msg> {
-        let mut c = Column::new().spacing(8);
+    /// Contexto, sessão de 5 h e semana: (rótulo, fração usada, valor escrito).
+    fn usos(&self) -> Vec<(&'static str, f32, String)> {
+        let mut v = Vec::new();
         let (usados, janela) = self.chat.contexto;
         if usados > 0 {
             let fracao = if janela > 0 {
@@ -2296,21 +2308,32 @@ impl Code {
             } else {
                 tokens(usados)
             };
-            c = c.push(barra("Contexto", fracao, valor));
+            v.push(("Contexto", fracao, valor));
         }
         if let Some(u) = self.chat.uso.0 {
-            c = c.push(barra("Sessão (5 h)", u, format!("{:.0}%", u * 100.0)));
+            v.push(("Sessão (5 h)", u, format!("{:.0}%", u * 100.0)));
         }
         if let Some(u) = self.chat.uso.1 {
-            c = c.push(barra("Semana (7 dias)", u, format!("{:.0}%", u * 100.0)));
+            v.push(("Semana (7 dias)", u, format!("{:.0}%", u * 100.0)));
         }
-        c.into()
+        v
+    }
+
+    fn barras_view(&self) -> Element<'_, Msg> {
+        column(
+            self.usos()
+                .into_iter()
+                .map(|(rotulo, fracao, valor)| barra(rotulo, fracao, valor)),
+        )
+        .spacing(8)
+        .width(Length::FILL)
+        .into()
     }
 
     fn detalhes_view(&self) -> Element<'_, Msg> {
         let i = &self.chat.info;
         let rotulo = |t: &'static str| text(t).size(11).font(NEGRITO).color(COR_TEXTO_MUTED());
-        let mut c = Column::new().spacing(10).push(self.barras_view());
+        let mut c = column![self.barras_view()].spacing(10).width(Length::FILL);
         if i.versao.is_empty() {
             c = c.push(
                 text("Os detalhes aparecem depois da primeira mensagem, quando o agente abre.")
@@ -2333,20 +2356,22 @@ impl Code {
                 };
                 row![
                     text("●").size(8).color(cor),
-                    text(nome).size(12),
+                    text(nome.as_str()).size(12),
                     horizontal_space(),
                     text(frase).size(11).color(COR_TEXTO_MUTED())
                 ]
                 .spacing(8)
-                .align_y(Alignment::Center)
+                .align(Align::Center)
+                .width(Length::FILL)
                 .into()
             });
             c = c.push(
                 column![
                     rotulo("SERVIDORES MCP"),
-                    Column::with_children(mcp).spacing(3)
+                    column(mcp).spacing(3).width(Length::FILL)
                 ]
-                .spacing(4),
+                .spacing(4)
+                .width(Length::FILL),
             );
             c = c.push(
                 column![
@@ -2373,26 +2398,16 @@ impl Code {
         }
         container(c)
             .padding(10)
-            .width(Length::Fill)
-            .style(|_| container::Style {
-                border: Border {
-                    color: COR_BORDA(),
-                    width: 1.0,
-                    radius: 6.0.into(),
-                },
-                ..fundo(COR_PAINEL())
-            })
+            .width(Length::FILL)
+            .style(|_| fundo(COR_PAINEL()).border(Border::rounded(6.0).color(COR_BORDA(), 1.0)))
             .into()
     }
 
     fn status_view(&self) -> Element<'_, Msg> {
         let (pos, lingua) = match self.aba() {
             Some(a) => {
-                let (l, c) = a.conteudo.cursor_position();
-                (
-                    format!("Ln {}, Col {}", l + 1, c + 1),
-                    linguagem(&a.caminho),
-                )
+                let (l, c) = a.conteudo.cursor();
+                (format!("Ln {l}, Col {c}"), linguagem(&a.caminho))
             }
             None => (String::new(), String::new()),
         };
@@ -2405,7 +2420,11 @@ impl Code {
             .size(11)
             .into()
         } else {
-            text(&self.aviso).size(11).color(COR_ERRO()).into()
+            text(self.aviso.as_str())
+                .size(11)
+                .color(COR_ERRO())
+                .ellipsis()
+                .into()
         };
         container(
             row![
@@ -2416,15 +2435,13 @@ impl Code {
                 text(lingua).size(11)
             ]
             .spacing(18)
-            .align_y(Alignment::Center),
+            .align(Align::Center),
         )
         .padding([0, 12])
+        .width(Length::FILL)
         .height(ALTURA_STATUS)
-        .align_y(Alignment::Center)
-        .style(|_| container::Style {
-            text_color: Some(COR_TEXTO_MUTED()),
-            ..fundo(COR_FUNDO_JANELA())
-        })
+        .align_y(Align::Center)
+        .style(|_| fundo(COR_FUNDO_JANELA()).text_color(COR_TEXTO_MUTED()))
         .into()
     }
 }
@@ -2433,75 +2450,44 @@ fn item_view(i: usize, item: &Item) -> Element<'_, Msg> {
     match item {
         // Clicar na mensagem a devolve ao campo, para mandar de novo ou corrigir.
         Item::Eu(t) => mouse_area(
-            container(text(t).size(13))
+            container(text(t.as_str()).size(13))
                 .padding([8, 10])
-                .width(Length::Fill)
-                .style(|_| container::Style {
-                    border: Border {
-                        color: mistura_cor(COR_BORDA(), COR_AZUL_ACENTO(), 0.4),
-                        width: 1.0,
-                        radius: 6.0.into(),
-                    },
-                    ..fundo(mistura_cor(COR_PAINEL(), COR_AZUL_ACENTO(), 0.08))
+                .width(Length::FILL)
+                .style(|_| {
+                    fundo(mistura_cor(COR_PAINEL(), COR_AZUL_ACENTO(), 0.08)).border(
+                        Border::rounded(6.0)
+                            .color(mistura_cor(COR_BORDA(), COR_AZUL_ACENTO(), 0.4), 1.0),
+                    )
                 }),
         )
         .on_press(Msg::Pedido(t.clone()))
-        .interaction(iced::mouse::Interaction::Pointer)
+        .cursor_icon(CursorIcon::Pointer)
         .into(),
-        // shortcut: resposta em texto puro; o widget markdown do Iced entra quando o bloco de código fizer falta.
-        Item::Texto(fonte, md) => {
-            let estilo = markdown::Style {
-                inline_code_highlight: markdown::Highlight {
-                    background: COR_HOVER().into(),
-                    border: Border {
-                        radius: 3.0.into(),
-                        ..Default::default()
-                    },
-                },
-                inline_code_padding: iced::Padding {
-                    top: 0.0,
-                    right: 3.0,
-                    bottom: 0.0,
-                    left: 3.0,
-                },
-                inline_code_color: COR_TEXTO(),
-                link_color: COR_AZUL_ACENTO(),
-            };
+        Item::Texto(fonte) => {
             let copiar = tooltip(
                 botao_icone("copy", Msg::Copiar(fonte.clone())),
-                container(text("Copiar resposta").size(11))
-                    .padding([3, 8])
-                    .style(tema::estilo_dica),
-                tooltip::Position::Top,
-            );
-            column![
-                markdown::view(
-                    md,
-                    markdown::Settings {
-                        code_size: 12.into(),
-                        ..markdown::Settings::with_text_size(13)
-                    },
-                    estilo,
-                )
-                .map(Msg::Link),
-                copiar
-            ]
-            .spacing(4)
-            .into()
+                "Copiar resposta",
+                TooltipPosition::Top,
+            )
+            .padding([3, 8])
+            .style(tema::estilo_dica);
+            column![markdown(fonte, 13.0, Msg::Link), copiar]
+                .spacing(4)
+                .width(Length::FILL)
+                .into()
         }
         Item::Ferramenta { frase, erro, .. } => passo(frase, *erro),
-        Item::Aviso(t) => text(t).size(12).color(COR_ERRO()).into(),
+        Item::Aviso(t) => text(t.as_str()).size(12).color(COR_ERRO()).into(),
         Item::Pedido {
             frase,
             previa,
             resposta,
             ..
         } => {
-            let mut cartao = Column::new().push(
-                container(text(frase).size(12).font(MONO))
-                    .padding([7, 10])
-                    .width(Length::Fill),
-            );
+            let mut cartao = column![container(text(frase.as_str()).size(12).font(MONO))
+                .padding([7, 10])
+                .width(Length::FILL)]
+            .width(Length::FILL);
             if !previa.is_empty() {
                 let linhas = previa.iter().map(|(s, l)| {
                     let (cor, faixa) = match s {
@@ -2514,19 +2500,18 @@ fn item_view(i: usize, item: &Item) -> Element<'_, Msg> {
                             .font(MONO)
                             .size(11)
                             .color(cor)
-                            .wrapping(Wrapping::None),
+                            .no_wrap(),
                     )
                     .padding([1, 10])
-                    .width(Length::Shrink)
                     .style(move |_| fundo(faixa))
                     .into()
                 });
                 // Linha comprida rola de lado em vez de quebrar: o diff tem que ser lido como está.
-                let diff = scrollable(Column::with_children(linhas))
-                    .direction(scrollable::Direction::Horizontal(
-                        scrollable::Scrollbar::new().width(4).scroller_width(4),
-                    ))
-                    .style(rolagem_discreta);
+                let diff = scrollable(column(linhas))
+                    .direction(Direction::Horizontal)
+                    .scrollbar_width(4.0)
+                    .scrollbar_color(COR_BORDA())
+                    .width(Length::FILL);
                 cartao = cartao.push(linha_horizontal()).push(diff);
             }
             let fim: Element<Msg> = match resposta {
@@ -2546,6 +2531,7 @@ fn item_view(i: usize, item: &Item) -> Element<'_, Msg> {
                     ),
                 ]
                 .padding(6)
+                .width(Length::FILL)
                 .into(),
                 Resposta::Recusou => container(text("Recusado").size(12).color(COR_ERRO()))
                     .padding([6, 10])
@@ -2556,18 +2542,16 @@ fn item_view(i: usize, item: &Item) -> Element<'_, Msg> {
             };
             let pendente = *resposta == Resposta::Pendente;
             container(cartao.push(fim))
-                .width(Length::Fill)
-                .style(move |_| container::Style {
-                    border: Border {
-                        color: if pendente {
+                .width(Length::FILL)
+                .style(move |_| {
+                    fundo(COR_PAINEL()).border(Border::rounded(6.0).color(
+                        if pendente {
                             COR_AZUL_ACENTO()
                         } else {
                             COR_BORDA()
                         },
-                        width: 1.0,
-                        radius: 6.0.into(),
-                    },
-                    ..fundo(COR_PAINEL())
+                        1.0,
+                    ))
                 })
                 .into()
         }
@@ -2582,66 +2566,31 @@ fn passo(frase: &str, erro: bool) -> Element<'_, Msg> {
         text(frase).size(12).color(COR_TEXTO_MUTED())
     ]
     .spacing(8)
-    .align_y(Alignment::Center)
+    .align(Align::Center)
     .into()
 }
 
 fn linha_do_tempo(passos: Vec<Element<'_, Msg>>) -> Element<'_, Msg> {
-    Column::with_children(passos)
+    column(passos)
         .spacing(6)
-        .padding(iced::Padding {
+        .padding(Padding {
             top: 0.0,
             right: 0.0,
             bottom: 0.0,
             left: 4.0,
         })
+        .width(Length::FILL)
         .into()
 }
 
-/// Números das linhas: três textos (antes, a linha do cursor, depois) com a mesma métrica do editor.
-fn calha<'a>(total: usize, linha_cursor: usize, largura: f32, altura: f32) -> Element<'a, Msg> {
-    // Mesma largura em todos: o Iced alinha o bloco pela linha mais larga, não linha a linha.
-    let largura_num = total.to_string().len();
-    let numeros = |de: usize, ate: usize| {
-        (de..=ate)
-            .map(|n| format!("{n:>largura_num$}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-    let numero = |s: String, cor: Color| {
-        text(s)
-            .font(MONO)
-            .size(TAMANHO_FONTE)
-            .line_height(LineHeight::Absolute(ALTURA_LINHA.into()))
-            .wrapping(Wrapping::None)
-            .width(Length::Fill)
-            .align_x(iced::alignment::Horizontal::Right)
-            .color(cor)
-    };
-    let mut col = column![Space::with_height(MARGEM_V)];
-    if linha_cursor > 1 {
-        col = col.push(numero(numeros(1, linha_cursor - 1), COR_TEXTO_MUTED()));
-    }
-    col = col.push(numero(numeros(linha_cursor, linha_cursor), COR_TEXTO()));
-    if linha_cursor < total {
-        col = col.push(numero(numeros(linha_cursor + 1, total), COR_TEXTO_MUTED()));
-    }
-    container(col.padding(iced::Padding {
-        top: 0.0,
-        right: 12.0,
-        bottom: 0.0,
-        left: 4.0,
-    }))
-    .width(largura)
-    .height(altura)
-    .style(|_| fundo(COR_PAINEL()))
-    .into()
-}
-
 fn opcao<'a>(tecla: &'a str, rotulo: &'a str, msg: Msg, foco: bool) -> Element<'a, Msg> {
-    button(row![text(tecla).font(MONO).size(11), text(rotulo).size(12)].spacing(10))
+    button(
+        row![text(tecla).font(MONO).size(11), text(rotulo).size(12)]
+            .spacing(10)
+            .width(Length::FILL),
+    )
         .on_press(msg)
-        .width(Length::Fill)
+        .width(Length::FILL)
         .padding([5, 8])
         .style(move |_, s| item_lista(foco, s, 4.0))
         .into()
@@ -2658,125 +2607,35 @@ fn tokens(n: u64) -> String {
     }
 }
 
-/// Desenha apenas as faixas visíveis, sem uma superfície do tamanho do arquivo.
-struct LinhasAlternadas {
-    total: usize,
-    habilitado: bool,
-    tamanho: Size,
-}
-
-impl<M> iced::advanced::Widget<M, iced::Theme, iced::Renderer> for LinhasAlternadas {
-    fn size(&self) -> Size<Length> {
-        Size::new(
-            Length::Fixed(self.tamanho.width),
-            Length::Fixed(self.tamanho.height),
-        )
+/// O anel: o círculo cinza e, por cima, o arco do quanto já foi usado.
+fn anel(r: &mut pelicano::Renderer, area: pelicano::Rect, fracao: f32) {
+    use pelicano::{LineCap, Path, PathBuilder, Stroke};
+    let centro = Point::new(area.x + area.width / 2.0, area.y + area.height / 2.0);
+    let raio = area.width.min(area.height) / 2.0 - 2.0;
+    if let Some(c) = Path::circle(centro, raio) {
+        r.stroke_path(&c, &Stroke::new(2.5), COR_BORDA());
     }
-
-    fn layout(
-        &self,
-        _: &mut iced::advanced::widget::Tree,
-        _: &iced::Renderer,
-        limits: &iced::advanced::layout::Limits,
-    ) -> iced::advanced::layout::Node {
-        iced::advanced::layout::Node::new(limits.resolve(
-            Length::Fixed(self.tamanho.width),
-            Length::Fixed(self.tamanho.height),
-            Size::ZERO,
-        ))
+    let f = fracao.clamp(0.0, 1.0);
+    if f <= 0.0 {
+        return;
     }
-
-    fn draw(
-        &self,
-        _: &iced::advanced::widget::Tree,
-        renderer: &mut iced::Renderer,
-        _: &iced::Theme,
-        _: &iced::advanced::renderer::Style,
-        layout: iced::advanced::Layout<'_>,
-        _: iced::mouse::Cursor,
-        viewport: &iced::Rectangle,
-    ) {
-        use iced::advanced::Renderer as _;
-        if !self.habilitado {
-            return;
-        }
-        let bounds = layout.bounds();
-        let Some(visivel) = bounds.intersection(viewport) else {
-            return;
-        };
-        let topo = bounds.y + MARGEM_V;
-        let primeira = ((visivel.y - topo).max(0.0) / ALTURA_LINHA).floor() as usize;
-        let fim = (((visivel.y + visivel.height - topo).max(0.0) / ALTURA_LINHA).ceil() as usize)
-            .min(self.total);
-        let primeira_impar = primeira | 1;
-        for linha in (primeira_impar..fim).step_by(2) {
-            let faixa = iced::Rectangle {
-                x: visivel.x,
-                y: topo + linha as f32 * ALTURA_LINHA,
-                width: visivel.width,
-                height: ALTURA_LINHA,
-            };
-            if let Some(bounds) = faixa.intersection(&visivel) {
-                renderer.fill_quad(
-                    iced::advanced::renderer::Quad {
-                        bounds,
-                        ..Default::default()
-                    },
-                    COR_TEXTO().scale_alpha(0.035),
-                );
-            }
-        }
-    }
-}
-
-struct Anel(f32);
-
-impl<M> iced::widget::canvas::Program<M> for Anel {
-    type State = ();
-
-    fn draw(
-        &self,
-        _: &(),
-        renderer: &iced::Renderer,
-        _: &iced::Theme,
-        bounds: iced::Rectangle,
-        _: iced::mouse::Cursor,
-    ) -> Vec<iced::widget::canvas::Geometry> {
-        use iced::widget::canvas::{path, Frame, Path, Stroke};
-        let mut frame = Frame::new(renderer, bounds.size());
-        let centro = frame.center();
-        let raio = bounds.width.min(bounds.height) / 2.0 - 2.0;
-        frame.stroke(
-            &Path::circle(centro, raio),
-            Stroke::default().with_width(2.5).with_color(COR_BORDA()),
-        );
-        let f = self.0.clamp(0.0, 1.0);
-        if f > 0.0 {
-            let cor = if f > 0.9 {
-                COR_ERRO()
-            } else if f > 0.75 {
-                AMARELO
-            } else {
-                COR_AZUL_ACENTO()
-            };
-            let inicio = -std::f32::consts::FRAC_PI_2;
-            let arco = Path::new(|b| {
-                b.arc(path::Arc {
-                    center: centro,
-                    radius: raio,
-                    start_angle: iced::Radians(inicio),
-                    end_angle: iced::Radians(inicio + f * std::f32::consts::TAU),
-                })
-            });
-            frame.stroke(
-                &arco,
-                Stroke::default()
-                    .with_width(2.5)
-                    .with_color(cor)
-                    .with_line_cap(iced::widget::canvas::LineCap::Round),
-            );
-        }
-        vec![frame.into_geometry()]
+    let cor = if f > 0.9 {
+        COR_ERRO()
+    } else if f > 0.75 {
+        AMARELO
+    } else {
+        COR_AZUL_ACENTO()
+    };
+    let inicio = -std::f32::consts::FRAC_PI_2;
+    let mut arco = PathBuilder::new();
+    arco.arc(
+        centro,
+        Point::new(raio, raio),
+        inicio,
+        inicio + f * std::f32::consts::TAU,
+    );
+    if let Some(arco) = arco.build() {
+        r.stroke_path(&arco, &Stroke::new(2.5).cap(LineCap::Round), cor);
     }
 }
 
@@ -2810,12 +2669,12 @@ fn nome_modelo(id: &str) -> String {
 /// Conversas guardadas desta pasta; clicar continua a conversa.
 fn historico_view(lista: &[agente::Sessao]) -> Element<'_, Msg> {
     let agora = config::agora();
-    let mut c = Column::new().spacing(2).push(
-        text("CONVERSAS DESTA PASTA")
-            .size(10)
-            .font(NEGRITO)
-            .color(COR_TEXTO_MUTED()),
-    );
+    let mut c = column![text("CONVERSAS DESTA PASTA")
+        .size(10)
+        .font(NEGRITO)
+        .color(COR_TEXTO_MUTED())]
+    .spacing(2)
+    .width(Length::FILL);
     if lista.is_empty() {
         c = c.push(
             text("Nenhuma conversa guardada ainda.")
@@ -2827,15 +2686,16 @@ fn historico_view(lista: &[agente::Sessao]) -> Element<'_, Msg> {
         c = c.push(
             button(
                 column![
-                    text(&s.titulo).size(13),
+                    text(s.titulo.as_str()).size(13),
                     text(config::ha_quanto(s.quando, agora))
                         .size(11)
                         .color(COR_TEXTO_MUTED())
                 ]
-                .spacing(1),
+                .spacing(1)
+                .width(Length::FILL),
             )
             .on_press(Msg::Retomar(s.id.clone()))
-            .width(Length::Fill)
+            .width(Length::FILL)
             .padding([6, 8])
             .style(|_, st| item_lista(false, st, 6.0)),
         );
@@ -2850,24 +2710,20 @@ fn barra(rotulo: &str, fracao: f32, valor: String) -> Element<'_, Msg> {
             text(rotulo).size(11).color(COR_TEXTO_MUTED()),
             horizontal_space(),
             text(valor).size(11).color(COR_TEXTO_MUTED())
-        ],
+        ]
+        .width(Length::FILL),
         progress_bar(0.0..=1.0, u)
-            .height(4)
-            .style(|_| progress_bar::Style {
-                background: COR_BORDA().into(),
-                bar: COR_AZUL_ACENTO().into(),
-                border: Border {
-                    radius: 2.0.into(),
-                    ..Default::default()
-                },
-            }),
+            .width(Length::FILL)
+            .height(4.0)
+            .color(COR_AZUL_ACENTO()),
     ]
     .spacing(4)
+    .width(Length::FILL)
     .into()
 }
 
 /// A pena da marca sem o quadrado de fundo, para ficar sobre a cor do painel.
-fn pena(tamanho: f32) -> iced::widget::Svg<'static> {
+fn pena<'a>(tamanho: f32) -> Element<'a, Msg> {
     let svg = marca::svg_para(marca::produto_atual(), true);
     let sem_fundo = match (
         svg.find("<rect id=\"fundo-arredondado\""),
@@ -2876,11 +2732,10 @@ fn pena(tamanho: f32) -> iced::widget::Svg<'static> {
         (Some(a), Some(b)) if a < b => format!("{}{}", &svg[..a], &svg[b..]),
         _ => svg,
     };
-    iced::widget::svg(iced::widget::svg::Handle::from_memory(
-        sem_fundo.into_bytes(),
-    ))
-    .width(tamanho)
-    .height(tamanho)
+    match pelicano::Svg::from_bytes(sem_fundo.as_bytes()) {
+        Some(s) => pelicano::svg(s).width(tamanho).height(tamanho).into(),
+        None => Space::new(tamanho, tamanho).into(),
+    }
 }
 
 /// Ramo atual lido do `.git/HEAD`, sem chamar o git.
@@ -2933,71 +2788,68 @@ fn botao_rodar<'a>(rotulo: &'a str, cor: Color, msg: Msg, dica: String) -> Eleme
     let b = button(
         row![simbolo, text(rotulo).size(12)]
             .spacing(6)
-            .align_y(Alignment::Center),
+            .align(Align::Center),
     )
     .on_press(msg)
     .padding([4, 10])
-    .style(move |_, s| button::Style {
-        background: Some(
-            (if matches!(s, button::Status::Hovered) {
+    .style(move |_, s| {
+        Style::default()
+            .background(if matches!(s, Status::Hovered) {
                 COR_HOVER()
             } else {
                 COR_PAINEL()
             })
-            .into(),
-        ),
-        text_color: COR_TEXTO(),
-        border: Border {
-            color: COR_BORDA(),
-            width: 1.0,
-            radius: 6.0.into(),
-        },
-        ..Default::default()
+            .text_color(COR_TEXTO())
+            .border(Border::rounded(6.0).color(COR_BORDA(), 1.0))
     });
-    tooltip(
-        b,
-        container(text(dica).font(MONO).size(11))
-            .padding([4, 8])
-            .style(|_| container::Style {
-                border: Border {
-                    color: COR_BORDA(),
-                    width: 1.0,
-                    radius: 6.0.into(),
-                },
-                ..fundo(COR_PAINEL())
-            }),
-        tooltip::Position::Bottom,
-    )
-    .into()
+    tooltip(b, dica, TooltipPosition::Bottom)
+        .padding([4, 8])
+        .style(tema::estilo_dica)
+        .into()
+}
+
+fn cursor_da_divisa(d: Divisa) -> CursorIcon {
+    if d == Divisa::Terminal {
+        CursorIcon::RowResize
+    } else {
+        CursorIcon::ColResize
+    }
+}
+
+/// O vão de `VAO` entre dois cartões; arrastar muda o tamanho do painel.
+fn alca<'a>(d: Divisa) -> Element<'a, Msg> {
+    let espaco = if d == Divisa::Terminal {
+        Space::new(Length::FILL, VAO)
+    } else {
+        Space::new(VAO, Length::FILL)
+    };
+    mouse_area(espaco)
+        .on_press(Msg::Redimensionar(Some(d)))
+        .cursor_icon(cursor_da_divisa(d))
+        .into()
 }
 
 fn mistura_cor(a: Color, b: Color, t: f32) -> Color {
     Color {
-        r: a.r + (b.r - a.r) * t,
-        g: a.g + (b.g - a.g) * t,
-        b: a.b + (b.b - a.b) * t,
         a: 1.0,
+        ..a.mix(b, t)
     }
 }
 
-fn fundo(cor: Color) -> container::Style {
-    container::Style {
-        background: Some(cor.into()),
-        text_color: Some(COR_TEXTO()),
-        ..Default::default()
-    }
+fn fundo(cor: Color) -> Style {
+    Style::default().background(cor).text_color(COR_TEXTO())
 }
 
 fn linha_vertical<'a>() -> Element<'a, Msg> {
-    container(Space::with_width(1))
-        .height(Length::Fill)
+    container(Space::new(1.0, 0.0))
+        .height(Length::FILL)
         .style(|_| fundo(COR_BORDA_SUAVE()))
         .into()
 }
 
 fn linha_horizontal<'a>() -> Element<'a, Msg> {
-    container(Space::with_height(1))
-        .width(Length::Fill)
+    container(Space::new(0.0, 1.0))
+        .width(Length::FILL)
         .style(|_| fundo(COR_BORDA_SUAVE()))
         .into()
 }
@@ -3011,95 +2863,64 @@ fn botao_texto<'a>(conteudo: impl Into<Element<'a, Msg>>, msg: Msg) -> Element<'
 }
 
 fn botao_icone<'a>(nome: &str, msg: Msg) -> Element<'a, Msg> {
-    button(container(icone_traco(nome, 14.0)).center(22))
-        .on_press(msg)
-        .padding(0)
-        .style(|_, s| item_lista(false, s, 4.0))
-        .into()
+    button(
+        container(icone_traco(nome, 14.0))
+            .center()
+            .width(22.0)
+            .height(22.0),
+    )
+    .on_press(msg)
+    .padding(0)
+    .style(|_, s| item_lista(false, s, 4.0))
+    .into()
 }
 
-fn item_lista(ativo: bool, s: button::Status, raio: f32) -> button::Style {
-    let fundo = match (ativo, s) {
-        (true, _) => Some(COR_AZUL_FUNDO().into()),
-        (_, button::Status::Hovered | button::Status::Pressed) => Some(COR_HOVER().into()),
-        _ => None,
-    };
-    button::Style {
-        background: fundo,
-        text_color: if ativo {
+fn item_lista(ativo: bool, s: Status, raio: f32) -> Style {
+    let estilo = Style::default()
+        .text_color(if ativo {
             COR_AZUL_ACENTO()
         } else {
             COR_TEXTO()
-        },
-        border: Border {
-            radius: raio.into(),
-            ..Default::default()
-        },
-        ..Default::default()
+        })
+        .border(Border::rounded(raio));
+    match (ativo, s) {
+        (true, _) => estilo.background(COR_AZUL_FUNDO()),
+        (_, Status::Hovered | Status::Pressed) => estilo.background(COR_HOVER()),
+        _ => estilo,
     }
 }
 
 /// Painel em cartão: cantos arredondados e borda suave. `cor` é o fundo do painel, para os cantos
 /// não ficarem quadrados por baixo do que ele desenha.
-fn cartao<'a>(conteudo: impl Into<Element<'a, Msg>>, cor: Color) -> Element<'a, Msg> {
+fn cartao<'a>(conteudo: impl Into<Element<'a, Msg>>, cor: Color, altura: Length) -> Element<'a, Msg> {
     container(conteudo)
         .padding(1)
         .clip(true)
-        .style(move |_| container::Style {
-            border: Border {
-                color: COR_BORDA_SUAVE(),
-                width: 1.0,
-                radius: 8.0.into(),
-            },
-            ..fundo(cor)
-        })
+        .height(altura)
+        .style(move |_| fundo(cor).border(Border::rounded(8.0).color(COR_BORDA_SUAVE(), 1.0)))
         .into()
 }
 
-fn aba_estilo(ativa: bool, s: button::Status) -> button::Style {
-    let fundo = if ativa {
-        None
-    } else if matches!(s, button::Status::Hovered) {
-        Some(COR_HOVER().into())
+fn aba_estilo(ativa: bool, s: Status) -> Style {
+    let estilo = Style::default().text_color(if ativa {
+        COR_TEXTO()
     } else {
-        None
-    };
-    button::Style {
-        background: fundo,
-        text_color: if ativa {
-            COR_TEXTO()
-        } else {
-            COR_TEXTO_MUTED()
-        },
-        ..Default::default()
+        COR_TEXTO_MUTED()
+    });
+    if !ativa && matches!(s, Status::Hovered) {
+        estilo.background(COR_HOVER())
+    } else {
+        estilo
     }
 }
 
-fn botao_enviar(_: &iced::Theme, s: button::Status) -> button::Style {
-    let cor = if matches!(s, button::Status::Hovered) {
+fn botao_enviar(_: &Theme, s: Status) -> Style {
+    let cor = if matches!(s, Status::Hovered) {
         mistura_cor(COR_AZUL_ACENTO(), COR_TEXTO(), 0.15)
     } else {
         COR_AZUL_ACENTO()
     };
-    button::Style {
-        background: Some(cor.into()),
-        border: Border {
-            radius: 5.0.into(),
-            ..Default::default()
-        },
-        ..Default::default()
-    }
-}
-
-fn editor_sem_borda(t: &iced::Theme, s: text_editor::Status) -> text_editor::Style {
-    text_editor::Style {
-        background: Color::TRANSPARENT.into(),
-        border: Border::default(),
-        value: COR_TEXTO(),
-        placeholder: COR_TEXTO_MUTED(),
-        selection: COR_AZUL_FUNDO(),
-        ..text_editor::default(t, s)
-    }
+    Style::default().background(cor).border(Border::rounded(5.0))
 }
 
 /// "Você" ou o nome do agente, em cima de cada troca do chat.
@@ -3111,51 +2932,38 @@ fn rotulo_de_quem<'a>(quem: String, eu: bool) -> Element<'a, Msg> {
         text(quem).size(11).font(NEGRITO).color(COR_TEXTO_MUTED()),
     ]
     .spacing(6)
-    .align_y(Alignment::Center)
+    .align(Align::Center)
     .into()
 }
 
-fn campo_sem_borda(t: &iced::Theme, s: text_input::Status) -> text_input::Style {
-    text_input::Style {
-        background: Color::TRANSPARENT.into(),
-        border: Border::default(),
-        value: COR_TEXTO(),
-        placeholder: COR_TEXTO_MUTED(),
-        selection: COR_AZUL_FUNDO(),
-        ..text_input::default(t, s)
-    }
-}
-
-fn lista_sem_borda(_: &iced::Theme, s: pick_list::Status) -> pick_list::Style {
-    pick_list::Style {
-        text_color: COR_TEXTO_MUTED(),
-        placeholder_color: COR_TEXTO_MUTED(),
-        handle_color: COR_TEXTO_MUTED(),
-        background: if matches!(s, pick_list::Status::Hovered | pick_list::Status::Opened) {
-            COR_HOVER().into()
+/// Campo de texto com borda que acende no foco, sobre o fundo `cor`.
+fn campo(cor: Color) -> impl Fn(&Theme, Status) -> Style {
+    move |_, s| {
+        let borda = if s == Status::Focused {
+            COR_AZUL_ACENTO()
         } else {
-            Color::TRANSPARENT.into()
-        },
-        border: Border {
-            radius: 4.0.into(),
-            ..Default::default()
-        },
+            COR_BORDA()
+        };
+        fundo(cor).border(Border::rounded(6.0).color(borda, 1.0))
     }
 }
 
-/// Barra de rolagem sem trilho: só o puxador aparece, como nos editores de código.
-fn rolagem_discreta(t: &iced::Theme, s: scrollable::Status) -> scrollable::Style {
-    let mut estilo = scrollable::default(t, s);
-    for trilho in [&mut estilo.vertical_rail, &mut estilo.horizontal_rail] {
-        trilho.background = None;
-        trilho.border = Border::default();
-        trilho.scroller.color = COR_BORDA();
-        trilho.scroller.border = Border {
-            radius: 3.0.into(),
-            ..Default::default()
-        };
+fn lista_sem_borda(_: &Theme, s: Status) -> Style {
+    let estilo = Style::default()
+        .text_color(COR_TEXTO_MUTED())
+        .border(Border::rounded(4.0));
+    if matches!(s, Status::Hovered | Status::Pressed | Status::Focused) {
+        estilo.background(COR_HOVER())
+    } else {
+        estilo
     }
-    estilo
+}
+
+/// Rolagem com a barra fina e discreta, como nos editores de código.
+fn rolagem<'a>(conteudo: impl Into<Element<'a, Msg>>) -> pelicano::Scrollable<'a, Msg> {
+    tema::rolagem(conteudo)
+        .scrollbar_width(6.0)
+        .scrollbar_color(COR_BORDA())
 }
 
 #[cfg(test)]
@@ -3164,13 +2972,13 @@ mod testes {
     fn chats_recebem_eventos_sem_perder_a_aba_ativa() {
         use super::*;
         let (mut code, _) = Code::novo(config::Config::ler());
-        code.chat.pedido = text_editor::Content::with_text("rascunho do primeiro");
+        code.chat.pedido = Content::with_text("rascunho do primeiro");
         code.chat.ocupado = true;
         code.chat.ligado = true;
         let primeiro = code.chat.conversa;
         let _ = code.update(Msg::NovaConversa);
         let segundo = code.chat.conversa;
-        code.chat.pedido = text_editor::Content::with_text("rascunho do segundo");
+        code.chat.pedido = Content::with_text("rascunho do segundo");
         assert_ne!(primeiro, segundo);
         assert!(code.outros_chats[0].ligado);
         let (canal, mut receptor) = tokio::sync::mpsc::unbounded_channel();
@@ -3187,6 +2995,25 @@ mod testes {
         assert_eq!(code.chat.pedido.text().trim_end(), "rascunho do segundo");
         assert!(!code.outros_chats[0].ocupado);
         assert!(!code.outros_chats[0].ligado);
+    }
+
+    #[test]
+    fn trecho_vai_no_pedido_com_o_rotulo() {
+        use super::*;
+        let (mut code, _) = Code::novo(config::Config::ler());
+        let conteudo = Content::with_text("fn a() {}\nfn b() {}\n");
+        code.abas.push(Aba {
+            caminho: code.arvore.raiz.join("x.rs"),
+            salvo: conteudo.version(),
+            conteudo,
+        });
+        let _ = code.update(Msg::MandarTrecho);
+        assert_eq!(code.chat.trechos[0].0, "x.rs 1");
+        let _ = code.update(Msg::Enviar);
+        assert!(code.chat.trechos.is_empty());
+        assert!(matches!(code.chat.itens.last(), Some(Item::Eu(t)) if t == "[x.rs 1]"));
+        let linha = &code.chat.fila[0];
+        assert!(linha.contains("linhas 1 a 1") && linha.contains("fn a() {}"));
     }
 
     #[test]

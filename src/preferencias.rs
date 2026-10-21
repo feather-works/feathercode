@@ -2,7 +2,25 @@
 use crate::config::Tema;
 use crate::*;
 use feather_ui::configuracoes::{linha, menu, tela};
-use iced::widget::{checkbox, column, row};
+use pelicano::{checkbox, column, row};
+
+/// O código da prévia: um pouco de cada cor (comentário, palavra-chave, texto, número, tipo).
+pub const AMOSTRA: &str = r#"// Conta as palavras de um texto
+use std::collections::HashMap;
+
+fn contar(texto: &str) -> HashMap<String, usize> {
+    let mut contagem = HashMap::new();
+    for palavra in texto.split_whitespace() {
+        *contagem.entry(palavra.to_lowercase()).or_insert(0) += 1;
+    }
+    contagem
+}
+
+fn main() {
+    let total = contar("pena leve, pena forte");
+    println!("{} palavras diferentes", total.len());
+}
+"#;
 
 const SECOES: [&str; 7] = [
     "Aparência",
@@ -50,8 +68,8 @@ impl Code {
                 .into()
             }
             1 => {
-                let mut cores = Column::new().spacing(4);
-                for (i, tema) in highlighter::Theme::ALL.iter().enumerate() {
+                let mut cores = column![].spacing(4);
+                for (i, tema) in Highlight::ALL.iter().enumerate() {
                     cores = cores.push(
                         button(text(paineis::nome_tema(*tema)).size(12))
                             .on_press(Msg::TemaCodigo(i))
@@ -71,7 +89,10 @@ impl Code {
                         "Escolha o tema de destaque da sintaxe.",
                         cores
                     ),
+                    text("Prévia").size(11).color(COR_TEXTO_MUTED()),
+                    self.amostra_view(),
                 ]
+                .spacing(8)
                 .into()
             }
             2 => column![
@@ -95,17 +116,12 @@ impl Code {
                 linha(
                     "Agente da conversa",
                     "Trocar de agente inicia uma conversa nova.",
-                    pick_list(
-                        self.agentes_instalados(),
-                        Some(self.chat.provedor),
-                        Msg::Provedor
-                    )
-                    .text_size(12)
+                    pick_list(&self.agentes, Some(self.chat.provedor), Msg::Provedor).size(12)
                 ),
                 linha(
                     "Permissões",
                     "Escolha como o agente pode atuar na conversa atual.",
-                    pick_list(Modo::TODOS, Some(self.chat.modo), Msg::Modo).text_size(12)
+                    pick_list(&Modo::TODOS, Some(self.chat.modo), Msg::Modo).size(12)
                 ),
                 text(self.explicacao_agente())
                     .size(12)
@@ -129,7 +145,7 @@ impl Code {
             ]
             .into(),
             5 => {
-                let mut lista = Column::new();
+                let mut lista = column![];
                 for (acao, tecla) in [
                     ("Configurações", "Ctrl+,"),
                     ("Abrir pasta", "Ctrl+O"),
@@ -169,5 +185,31 @@ impl Code {
             corpo,
             Some(("Fechar", Msg::Configuracoes(None))),
         )
+    }
+
+    /// O exemplo no mesmo editor do código, com o tema e as linhas alternadas escolhidos.
+    fn amostra_view(&self) -> Element<'_, Msg> {
+        // shortcut: dá para digitar na prévia (o editor do pelicano não tem modo só leitura); não grava nada.
+        let mut editor = text_editor(&self.amostra)
+            .idle_focus(false)
+            .font(MONO)
+            .size(TAMANHO_FONTE)
+            .line_height(ALTURA_LINHA)
+            .wrap(false)
+            .line_numbers(true)
+            .padding([MARGEM_V, MARGEM_H])
+            .highlight("rs", self.tema_codigo())
+            .style(|_, _| Style::default().background(COR_PAINEL()).text_color(COR_TEXTO()));
+        if self.config.linhas_alternadas {
+            editor = editor.stripes(COR_TEXTO().alpha(ALFA_LISTRAS));
+        }
+        let linhas = AMOSTRA.lines().count() as f32;
+        container(editor)
+            .width(Length::FILL)
+            .height(linhas * ALTURA_LINHA + 2.0 * MARGEM_V + 2.0)
+            .padding(1)
+            .clip(true)
+            .style(|_| fundo(COR_PAINEL()).border(Border::rounded(8.0).color(COR_BORDA_SUAVE(), 1.0)))
+            .into()
     }
 }

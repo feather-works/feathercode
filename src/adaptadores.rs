@@ -463,7 +463,7 @@ mod testes {
 #[cfg(test)]
 mod de_verdade {
     use crate::agente::{self, Evento, Provedor};
-    use iced::futures::StreamExt;
+    use pelicano::futures::StreamExt;
 
     #[tokio::test]
     #[ignore]

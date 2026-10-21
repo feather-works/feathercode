@@ -4,7 +4,7 @@ use crate::config::{self, Tema};
 use crate::modelos::{self, Tipo, MODELOS};
 use crate::*;
 // Explícito: o glob traria também o `column!` da std e ficaria ambíguo.
-use iced::widget::{checkbox, column, row};
+use pelicano::{checkbox, column, row};
 
 const LARGURA_ESQUERDA: f32 = 330.0;
 const MAX_RECENTES: usize = 5;
@@ -60,6 +60,8 @@ pub struct Estado {
     claude: Option<Option<String>>,
     pub outros: Vec<(&'static str, String)>,
     recentes: Vec<LinhaRecente>,
+    /// Opções do menu Tecnologia do tipo escolhido (o `pick_list` empresta a lista).
+    tecnologias: Vec<Tec>,
 }
 
 impl Estado {
@@ -75,8 +77,13 @@ impl Estado {
             claude: None,
             outros: Vec::new(),
             recentes: Vec::new(),
+            tecnologias: tecnologias(Tipo::Desktop),
         }
     }
+}
+
+fn tecnologias(t: Tipo) -> Vec<Tec> {
+    modelos::do_tipo(t).map(|(i, _)| Tec(i)).collect()
 }
 
 /// Versão de um programa pelo `--version`: a primeira palavra que começa com algarismo.
@@ -208,16 +215,17 @@ impl Code {
             Ini::NovoProjeto => {
                 self.ini.clonar = false;
                 self.ini.erro.clear();
-                return text_input::focus(text_input::Id::new("nome-projeto"));
+                return Task::focus("nome-projeto");
             }
             Ini::ClonarPainel => {
                 self.ini.clonar = true;
                 self.ini.erro.clear();
-                return text_input::focus(text_input::Id::new("url-clone"));
+                return Task::focus("url-clone");
             }
             Ini::Tipo(t) => {
                 self.ini.tipo = t;
                 self.ini.modelo = modelos::do_tipo(t).next().map_or(0, |(i, _)| i);
+                self.ini.tecnologias = tecnologias(t);
             }
             Ini::Tecnologia(Tec(i)) => self.ini.modelo = i,
             Ini::Nome(n) => {
@@ -306,7 +314,10 @@ impl Code {
                 }
             }
             Ini::ClaudeVersao(v) => self.ini.claude = Some(v),
-            Ini::OutrosAgentes(v) => self.ini.outros = v,
+            Ini::OutrosAgentes(v) => {
+                self.ini.outros = v;
+                self.agentes = self.agentes_instalados();
+            }
             Ini::Comecar => {
                 self.config.boas_vindas = true;
                 self.config.gravar();
@@ -324,7 +335,7 @@ impl Code {
             linha_vertical(),
             self.coluna_direita()
         ]
-        .height(Length::Fill)
+        .height(Length::FILL)
         .into()
     }
 
@@ -346,7 +357,7 @@ impl Code {
             .spacing(2),
         ]
         .spacing(12)
-        .align_y(Alignment::Center);
+        .align(Align::Center);
 
         let acoes = column![
             acao(
@@ -375,7 +386,7 @@ impl Code {
 
         let agora = config::agora();
         let limpar: Element<Msg> = if e.recentes.is_empty() {
-            Space::with_width(0).into()
+            Space::new(0.0, 0.0).into()
         } else {
             link_pequeno("Limpar", Msg::Ini(Ini::LimparRecentes))
         };
@@ -404,16 +415,9 @@ impl Code {
                         .color(COR_TEXTO_MUTED()),
                 )
                 .padding([0, 5])
-                .style(|_| container::Style {
-                    border: Border {
-                        color: COR_BORDA(),
-                        width: 1.0,
-                        radius: 4.0.into(),
-                    },
-                    ..Default::default()
-                })
+                .style(|_| Style::default().border(Border::rounded(4.0).color(COR_BORDA(), 1.0)))
                 .into(),
-                None => Space::with_width(0).into(),
+                None => Space::new(0.0, 0.0).into(),
             };
             let linha = row![
                 simbolo,
@@ -421,18 +425,18 @@ impl Code {
                     text(nome).size(13),
                     text(pai).size(11).color(COR_TEXTO_MUTED())
                 ]
-                .width(Length::Fill),
+                .width(Length::FILL),
                 ramo,
                 text(config::ha_quanto(r.quando, agora))
                     .size(11)
                     .color(COR_TEXTO_MUTED()),
             ]
             .spacing(8)
-            .align_y(Alignment::Center);
+            .align(Align::Center);
             button(linha)
                 .on_press(Msg::Ini(Ini::AbrirRecente(r.caminho.clone(), r.pasta)))
                 .padding([5, 6])
-                .width(Length::Fill)
+                .width(Length::FILL)
                 .style(|_, s| item_lista(false, s, 6.0))
                 .into()
         };
@@ -440,8 +444,8 @@ impl Code {
                      pasta: bool,
                      vazio: &'static str,
                      extra: Element<'static, Msg>| {
-            let mut c = Column::new().spacing(1).push(
-                row![titulo_secao(titulo), horizontal_space(), extra].align_y(Alignment::Center),
+            let mut c = column![].spacing(1).push(
+                row![titulo_secao(titulo), horizontal_space(), extra].align(Align::Center),
             );
             let mut algum = false;
             for r in e.recentes.iter().filter(|r| r.pasta == pasta) {
@@ -464,7 +468,7 @@ impl Code {
                 "Arquivos recentes",
                 false,
                 "Os arquivos que você abrir aparecem aqui.",
-                Space::with_width(0).into()
+                Space::new(0.0, 0.0).into()
             ),
         ]
         .spacing(16);
@@ -475,12 +479,11 @@ impl Code {
             .spacing(20)
             .padding([22, 20]);
         container(
-            tema::rolagem(corpo)
-                .style(rolagem_discreta)
-                .height(Length::Fill),
+            rolagem(corpo)
+                .height(Length::FILL),
         )
         .width(LARGURA_ESQUERDA)
-        .height(Length::Fill)
+        .height(Length::FILL)
         .style(|_| fundo(COR_PAINEL_FAIXA()))
         .into()
     }
@@ -508,10 +511,10 @@ impl Code {
             self.cartao_novo()
         };
         // shortcut: sem rolagem para o cartão poder ocupar a altura toda; janela muito baixa corta o pé.
-        container(column![cabecalho, cartao].spacing(14).height(Length::Fill))
+        container(column![cabecalho, cartao].spacing(14).height(Length::FILL))
             .padding([22, 24])
-            .width(Length::Fill)
-            .height(Length::Fill)
+            .width(Length::FILL)
+            .height(Length::FILL)
             .style(|_| fundo(COR_PAINEL()))
             .into()
     }
@@ -519,33 +522,30 @@ impl Code {
     fn cartao_novo(&self) -> Element<'_, Msg> {
         let e = &self.ini;
         let m = &MODELOS[e.modelo];
-        let tecnologias: Vec<Tec> = modelos::do_tipo(e.tipo).map(|(i, _)| Tec(i)).collect();
         let menus = row![
             rotulado(
                 "Tipo de produto",
-                pick_list(Tipo::TODOS, Some(e.tipo), |t| Msg::Ini(Ini::Tipo(t)))
-                    .text_size(13)
+                pick_list(&Tipo::TODOS, Some(e.tipo), |t| Msg::Ini(Ini::Tipo(t)))
+                    .size(13)
                     .padding([7, 10])
-                    .width(Length::Fill)
+                    .width(Length::FILL)
                     .style(lista_com_borda)
-                    .menu_style(tema::estilo_menu_popup)
                     .into()
             ),
             rotulado(
                 "Tecnologia",
                 row![
                     selo(m.selo),
-                    pick_list(tecnologias, Some(Tec(e.modelo)), |t| Msg::Ini(
+                    pick_list(&e.tecnologias, Some(Tec(e.modelo)), |t| Msg::Ini(
                         Ini::Tecnologia(t)
                     ))
-                    .text_size(13)
+                    .size(13)
                     .padding([7, 10])
-                    .width(Length::Fill)
+                    .width(Length::FILL)
                     .style(lista_com_borda)
-                    .menu_style(tema::estilo_menu_popup)
                 ]
                 .spacing(8)
-                .align_y(Alignment::Center)
+                .align(Align::Center)
                 .into()
             ),
         ]
@@ -561,42 +561,34 @@ impl Code {
             .color(COR_TEXTO_MUTED())
             .into(),
             Err(err) if !e.nome.is_empty() => text(*err).size(12).color(COR_ERRO()).into(),
-            Err(_) => Space::with_height(0).into(),
+            Err(_) => Space::new(0.0, 0.0).into(),
         };
-        let nome = text_input("meu-projeto", &e.nome)
-            .id(text_input::Id::new("nome-projeto"))
+        let nome = text_input("meu-projeto", e.nome.as_str())
+            .id("nome-projeto")
             .on_input(|n| Msg::Ini(Ini::Nome(n)))
             .on_submit(Msg::Ini(Ini::Criar))
             .size(13)
             .padding([7, 10])
-            .style(campo_com_borda);
+            .style(campo(COR_PAINEL_FAIXA()));
         let campos = column![
             rotulado("Nome do projeto", nome.into()),
             self.campo_onde(),
             destino
         ]
         .spacing(12)
-        .width(Length::Fill);
+        .width(Length::FILL);
         let estrutura = container(
             column![
                 text("Estrutura").size(11).color(COR_TEXTO_MUTED()),
-                tema::rolagem(text(m.estrutura(&e.nome)).font(MONO).size(12))
-                    .style(rolagem_discreta)
-                    .height(Length::Fill)
+                rolagem(text(m.estrutura(&e.nome)).font(MONO).size(12))
+                    .height(Length::FILL)
             ]
             .spacing(6),
         )
         .padding([10, 12])
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .style(|_| container::Style {
-            border: Border {
-                color: COR_BORDA_SUAVE(),
-                width: 1.0,
-                radius: 8.0.into(),
-            },
-            ..fundo(COR_PAINEL_FAIXA())
-        });
+        .width(Length::FILL)
+        .height(Length::FILL)
+        .style(|_| fundo(COR_PAINEL_FAIXA()).border(Border::rounded(8.0).color(COR_BORDA_SUAVE(), 1.0)));
 
         let comando = m
             .rodar
@@ -607,10 +599,8 @@ impl Code {
             );
         let git = checkbox("Iniciar repositório Git", self.config.iniciar_git)
             .on_toggle(|g| Msg::Ini(Ini::Git(g)))
-            .size(14)
-            .text_size(12)
-            .spacing(7)
-            .style(caixa_marcar);
+            .size(12)
+            .color(COR_AZUL_ACENTO());
         let criar = botao_primario(
             "Criar e abrir",
             pacote.is_ok().then_some(Msg::Ini(Ini::Criar)),
@@ -620,18 +610,18 @@ impl Code {
                 .font(MONO)
                 .size(12)
                 .color(COR_TEXTO_MUTED())
-                .width(Length::Fill),
+                .width(Length::FILL),
             git,
             criar
         ]
         .spacing(16)
-        .align_y(Alignment::Center);
+        .align(Align::Center);
 
         cartao(
             column![
                 menus,
                 text(m.descricao).size(12).color(COR_TEXTO_MUTED()),
-                row![campos, estrutura].spacing(18).height(Length::Fill),
+                row![campos, estrutura].spacing(18).height(Length::FILL),
                 linha_horizontal(),
                 rodape,
                 self.erro_view()
@@ -651,15 +641,15 @@ impl Code {
             .size(12)
             .color(COR_TEXTO_MUTED())
             .into(),
-            None => Space::with_height(0).into(),
+            None => Space::new(0.0, 0.0).into(),
         };
-        let url = text_input("https://github.com/usuario/projeto.git", &e.url)
-            .id(text_input::Id::new("url-clone"))
+        let url = text_input("https://github.com/usuario/projeto.git", e.url.as_str())
+            .id("url-clone")
             .on_input(|u| Msg::Ini(Ini::Url(u)))
             .on_submit(Msg::Ini(Ini::Clonar))
             .size(13)
             .padding([7, 10])
-            .style(campo_com_borda);
+            .style(campo(COR_PAINEL_FAIXA()));
         let pronto = !e.clonando && nome_do_repositorio(&e.url).is_some();
         let botao = botao_primario(
             if e.clonando {
@@ -680,7 +670,7 @@ impl Code {
                     horizontal_space(),
                     botao
                 ]
-                .align_y(Alignment::Center),
+                .align(Align::Center),
                 self.erro_view(),
             ]
             .spacing(14)
@@ -729,17 +719,11 @@ impl Code {
                 .spacing(1)
             ]
             .spacing(10)
-            .align_y(Alignment::Center),
+            .align(Align::Center),
         )
         .padding([8, 10])
-        .width(Length::Fill)
-        .style(move |_| container::Style {
-            border: Border {
-                radius: 8.0.into(),
-                ..Default::default()
-            },
-            ..fundo(fundo_claude)
-        });
+        .width(Length::FILL)
+        .style(move |_| fundo(fundo_claude).border(Border::rounded(8.0)));
         let mut col = column![claude].spacing(4);
         for (nome, v) in &self.ini.outros {
             col = col.push(
@@ -755,7 +739,7 @@ impl Code {
                 ]
                 .spacing(10)
                 .padding([4, 10])
-                .align_y(Alignment::Center),
+                .align(Align::Center),
             );
         }
         col.into()
@@ -771,8 +755,8 @@ impl Code {
                 .color(COR_TEXTO_MUTED()),
         ]
         .spacing(6)
-        .align_x(Alignment::Center)
-        .width(Length::Fill);
+        .align(Align::Center)
+        .width(Length::FILL);
         let temas = row![
             miniatura(Tema::Escuro, self.config.tema),
             miniatura(Tema::Claro, self.config.tema),
@@ -784,7 +768,7 @@ impl Code {
             horizontal_space(),
             botao_primario("Começar", Some(Msg::Ini(Ini::Comecar)))
         ]
-        .align_y(Alignment::Center);
+        .align(Align::Center);
         let cartao = container(
             column![
                 cabecalho,
@@ -795,23 +779,16 @@ impl Code {
             ]
             .spacing(22),
         )
-        .padding(iced::Padding {
+        .padding(Padding {
             top: 28.0,
             right: 30.0,
             bottom: 22.0,
             left: 30.0,
         })
-        .width(560)
-        .style(|_| container::Style {
-            border: Border {
-                color: COR_BORDA(),
-                width: 1.0,
-                radius: 12.0.into(),
-            },
-            ..fundo(COR_PAINEL())
-        });
+        .width(560.0)
+        .style(|_| fundo(COR_PAINEL()).border(Border::rounded(12.0).color(COR_BORDA(), 1.0)));
         container(cartao)
-            .center(Length::Fill)
+            .center().width(Length::FILL).height(Length::FILL)
             .style(|_| fundo(COR_CROMO()))
             .into()
     }
@@ -821,33 +798,26 @@ impl Code {
             row![
                 text(encurtar(&self.onde_criar()))
                     .size(13)
-                    .width(Length::Fill),
+                    .width(Length::FILL),
                 link_pequeno("Escolher…", Msg::Ini(Ini::EscolherOnde))
             ]
-            .align_y(Alignment::Center),
+            .align(Align::Center),
         )
-        .padding(iced::Padding {
+        .padding(Padding {
             top: 3.0,
             right: 4.0,
             bottom: 3.0,
             left: 10.0,
         })
-        .style(|_| container::Style {
-            border: Border {
-                color: COR_BORDA(),
-                width: 1.0,
-                radius: 6.0.into(),
-            },
-            ..fundo(COR_PAINEL_FAIXA())
-        });
+        .style(|_| fundo(COR_PAINEL_FAIXA()).border(Border::rounded(6.0).color(COR_BORDA(), 1.0)));
         rotulado("Criar em", caixa.into())
     }
 
     fn erro_view(&self) -> Element<'_, Msg> {
         if self.ini.erro.is_empty() {
-            Space::with_height(0).into()
+            Space::new(0.0, 0.0).into()
         } else {
-            text(&self.ini.erro).size(12).color(COR_ERRO()).into()
+            text(self.ini.erro.as_str()).size(12).color(COR_ERRO()).into()
         }
     }
 }
@@ -855,19 +825,13 @@ impl Code {
 /// Passo numerado da tela de boas-vindas.
 fn passo<'a>(n: &'a str, titulo: &'a str, conteudo: Element<'a, Msg>) -> Element<'a, Msg> {
     let numero = container(text(n).size(11).font(NEGRITO).color(COR_AZUL_ACENTO()))
-        .center(22)
-        .style(|_| container::Style {
-            border: Border {
-                radius: 11.0.into(),
-                ..Default::default()
-            },
-            ..fundo(COR_AZUL_FUNDO())
-        });
+        .center().width(22.0).height(22.0)
+        .style(|_| fundo(COR_AZUL_FUNDO()).border(Border::rounded(11.0)));
     row![
         numero,
         column![text(titulo).size(13).font(NEGRITO), conteudo]
             .spacing(8)
-            .width(Length::Fill)
+            .width(Length::FILL)
     ]
     .spacing(12)
     .into()
@@ -876,16 +840,9 @@ fn passo<'a>(n: &'a str, titulo: &'a str, conteudo: Element<'a, Msg>) -> Element
 fn cartao(corpo: Element<'_, Msg>) -> Element<'_, Msg> {
     container(corpo)
         .padding([18, 20])
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .style(|_| container::Style {
-            border: Border {
-                color: COR_BORDA(),
-                width: 1.0,
-                radius: 10.0.into(),
-            },
-            ..fundo(COR_PAINEL())
-        })
+        .width(Length::FILL)
+        .height(Length::FILL)
+        .style(|_| fundo(COR_PAINEL()).border(Border::rounded(10.0).color(COR_BORDA(), 1.0)))
         .into()
 }
 
@@ -909,7 +866,7 @@ fn titulo_secao(t: &str) -> Element<'_, Msg> {
 fn rotulado<'a>(rotulo: &'a str, campo: Element<'a, Msg>) -> Element<'a, Msg> {
     column![text(rotulo).size(11).color(COR_TEXTO_MUTED()), campo]
         .spacing(5)
-        .width(Length::Fill)
+        .width(Length::FILL)
         .into()
 }
 
@@ -929,17 +886,16 @@ fn acao<'a>(
     msg: Msg,
 ) -> Element<'a, Msg> {
     let quadro = container(icone_traco(icone, 14.0))
-        .center(26)
-        .style(move |_| container::Style {
-            border: Border {
-                radius: 6.0.into(),
-                ..Default::default()
-            },
-            ..fundo(if principal {
+        .center()
+        .width(26.0)
+        .height(26.0)
+        .style(move |_| {
+            fundo(if principal {
                 COR_AZUL_FUNDO()
             } else {
                 COR_HOVER()
             })
+            .border(Border::rounded(6.0))
         });
     let corpo = row![
         quadro,
@@ -949,31 +905,26 @@ fn acao<'a>(
         ]
     ]
     .spacing(10)
-    .align_y(Alignment::Center);
+    .width(Length::FILL)
+    .align(Align::Center);
     button(corpo)
         .on_press(msg)
         .padding([7, 10])
-        .width(Length::Fill)
-        .style(move |_, s| button::Style {
-            background: Some(
-                (if matches!(s, button::Status::Hovered) {
-                    COR_HOVER()
-                } else {
-                    COR_PAINEL()
-                })
-                .into(),
-            ),
-            text_color: COR_TEXTO(),
-            border: Border {
-                color: if principal {
+        .width(Length::FILL)
+        .style(move |_, s| {
+            fundo(if matches!(s, Status::Hovered) {
+                COR_HOVER()
+            } else {
+                COR_PAINEL()
+            })
+            .border(Border::rounded(8.0).color(
+                if principal {
                     COR_AZUL_ACENTO()
                 } else {
                     COR_BORDA_SUAVE()
                 },
-                width: 1.0,
-                radius: 8.0.into(),
-            },
-            ..Default::default()
+                1.0,
+            ))
         })
         .into()
 }
@@ -981,99 +932,78 @@ fn acao<'a>(
 /// "RS", "PY", "WEB" na cor da linguagem.
 fn selo(t: &str) -> Element<'_, Msg> {
     let cor = match t {
-        "RS" => Color::from_rgb8(0xb7, 0x41, 0x0e),
-        "PY" => Color::from_rgb8(0x35, 0x72, 0xa5),
-        _ => Color::from_rgb8(0xc2, 0x57, 0x1b),
+        "RS" => Color::rgb8(0xb7, 0x41, 0x0e),
+        "PY" => Color::rgb8(0x35, 0x72, 0xa5),
+        _ => Color::rgb8(0xc2, 0x57, 0x1b),
     };
-    container(
-        text(t)
-            .font(Font {
-                weight: font::Weight::Bold,
-                ..MONO
-            })
-            .size(9)
-            .color(Color::WHITE),
-    )
-    .center_y(20)
-    .center_x(30)
-    .style(move |_| container::Style {
-        background: Some(cor.into()),
-        border: Border {
-            radius: 4.0.into(),
-            ..Default::default()
-        },
-        ..Default::default()
-    })
-    .into()
+    container(text(t).font(MONO.weight(700)).size(9).color(Color::WHITE))
+        .center()
+        .width(30.0)
+        .height(20.0)
+        .style(move |_| Style::default().background(cor).border(Border::rounded(4.0)))
+        .into()
 }
 
 /// Miniatura do tema: duas faixas com as cores dele e o nome.
 fn miniatura<'a>(t: Tema, atual: Tema) -> Element<'a, Msg> {
     let (cor_a, cor_b, nome) = match t {
         Tema::Escuro => (
-            Color::from_rgb8(0x2a, 0x2d, 0x32),
-            Color::from_rgb8(0x3d, 0x41, 0x47),
+            Color::rgb8(0x2a, 0x2d, 0x32),
+            Color::rgb8(0x3d, 0x41, 0x47),
             "Escuro",
         ),
         Tema::Claro => (
-            Color::from_rgb8(0xf1, 0xf3, 0xf4),
-            Color::from_rgb8(0xda, 0xdc, 0xe0),
+            Color::rgb8(0xf1, 0xf3, 0xf4),
+            Color::rgb8(0xda, 0xdc, 0xe0),
             "Claro",
         ),
         Tema::Sistema => (
-            Color::from_rgb8(0x8a, 0x8e, 0x94),
-            Color::from_rgb8(0xda, 0xdc, 0xe0),
+            Color::rgb8(0x8a, 0x8e, 0x94),
+            Color::rgb8(0xda, 0xdc, 0xe0),
             "Sistema",
         ),
     };
     let faixa = |cor: Color| {
-        container(Space::with_height(6))
-            .width(Length::Fill)
-            .style(move |_| container::Style {
-                background: Some(cor.into()),
-                border: Border {
-                    color: COR_BORDA(),
-                    width: 0.5,
-                    radius: 2.0.into(),
-                },
-                ..Default::default()
+        container(Space::new(0.0, 6.0))
+            .width(Length::FILL)
+            .style(move |_| {
+                Style::default()
+                    .background(cor)
+                    .border(Border::rounded(2.0).color(COR_BORDA(), 0.5))
             })
     };
     let ativo = t == atual;
     let corpo = column![
         faixa(cor_a),
-        row![faixa(cor_b), Space::with_width(Length::Fill)],
+        row![faixa(cor_b), horizontal_space()],
         text(nome).size(11)
     ]
-    .spacing(3);
+    .spacing(3)
+    .width(Length::FILL);
     button(corpo)
         .on_press(Msg::Ini(Ini::Tema(t)))
         .padding(6)
-        .width(Length::Fill)
-        .style(move |_, s| button::Style {
-            background: Some(
-                (if matches!(s, button::Status::Hovered) {
+        .width(Length::FILL)
+        .style(move |_, s| {
+            Style::default()
+                .background(if matches!(s, Status::Hovered) {
                     COR_HOVER()
                 } else {
                     COR_PAINEL()
                 })
-                .into(),
-            ),
-            text_color: if ativo {
-                COR_TEXTO()
-            } else {
-                COR_TEXTO_MUTED()
-            },
-            border: Border {
-                color: if ativo {
-                    COR_AZUL_ACENTO()
+                .text_color(if ativo {
+                    COR_TEXTO()
                 } else {
-                    COR_BORDA()
-                },
-                width: if ativo { 2.0 } else { 1.0 },
-                radius: 7.0.into(),
-            },
-            ..Default::default()
+                    COR_TEXTO_MUTED()
+                })
+                .border(Border::rounded(7.0).color(
+                    if ativo {
+                        COR_AZUL_ACENTO()
+                    } else {
+                        COR_BORDA()
+                    },
+                    if ativo { 2.0 } else { 1.0 },
+                ))
         })
         .into()
 }
@@ -1086,90 +1016,39 @@ fn botao_primario(rotulo: &str, msg: Option<Msg>) -> Element<'_, Msg> {
         .style(move |_, s| {
             let cor = if !ativo {
                 COR_BORDA()
-            } else if matches!(s, button::Status::Hovered) {
+            } else if matches!(s, Status::Hovered) {
                 mistura_cor(COR_AZUL_ACENTO(), COR_TEXTO(), 0.15)
             } else {
                 COR_AZUL_ACENTO()
             };
-            button::Style {
-                background: Some(cor.into()),
-                text_color: if ativo {
+            Style::default()
+                .background(cor)
+                .text_color(if ativo {
                     COR_PAINEL()
                 } else {
                     COR_TEXTO_MUTED()
-                },
-                border: Border {
-                    radius: 6.0.into(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            }
+                })
+                .border(Border::rounded(6.0))
         })
         .into()
 }
 
-fn caixa_marcar(_: &iced::Theme, s: checkbox::Status) -> checkbox::Style {
-    let marcada = matches!(
-        s,
-        checkbox::Status::Active { is_checked: true }
-            | checkbox::Status::Hovered { is_checked: true }
-            | checkbox::Status::Disabled { is_checked: true }
-    );
-    checkbox::Style {
-        background: (if marcada {
-            COR_AZUL_ACENTO()
-        } else {
-            COR_PAINEL_FAIXA()
-        })
-        .into(),
-        icon_color: COR_PAINEL(),
-        border: Border {
-            color: if marcada {
-                COR_AZUL_ACENTO()
-            } else {
-                COR_BORDA()
-            },
-            width: 1.0,
-            radius: 4.0.into(),
-        },
-        text_color: Some(COR_TEXTO()),
-    }
-}
-
-fn lista_com_borda(_: &iced::Theme, s: pick_list::Status) -> pick_list::Style {
-    pick_list::Style {
-        text_color: COR_TEXTO(),
-        placeholder_color: COR_TEXTO_MUTED(),
-        handle_color: COR_TEXTO_MUTED(),
-        background: (if matches!(s, pick_list::Status::Hovered) {
+fn lista_com_borda(_: &Theme, s: Status) -> Style {
+    Style::default()
+        .text_color(COR_TEXTO())
+        .background(if matches!(s, Status::Hovered) {
             COR_HOVER()
         } else {
             COR_PAINEL_FAIXA()
         })
-        .into(),
-        border: Border {
-            color: if matches!(s, pick_list::Status::Opened) {
+        .border(Border::rounded(6.0).color(
+            if matches!(s, Status::Pressed | Status::Focused) {
                 COR_AZUL_ACENTO()
             } else {
                 COR_BORDA()
             },
-            width: 1.0,
-            radius: 6.0.into(),
-        },
-    }
-}
-
-fn campo_com_borda(t: &iced::Theme, s: text_input::Status) -> text_input::Style {
-    let foco = matches!(s, text_input::Status::Focused);
-    text_input::Style {
-        background: COR_PAINEL_FAIXA().into(),
-        border: Border {
-            color: if foco { COR_AZUL_ACENTO() } else { COR_BORDA() },
-            width: 1.0,
-            radius: 6.0.into(),
-        },
-        ..campo_sem_borda(t, s)
-    }
+            1.0,
+        ))
 }
 
 #[cfg(test)]

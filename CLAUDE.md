@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-FeatherCode is a code editor for the FeatherWorks suite, written in Rust with `iced` 0.13. Claude Code runs in a side panel. Code, comments, UI text and commit messages are all in Portuguese (pt-BR). Keep it that way.
+FeatherCode is a code editor for the FeatherWorks suite, written in Rust with `pelicano`, the suite's own UI library (`../pelicano`, path dependency for now). Claude Code runs in a side panel. Code, comments, UI text and commit messages are all in Portuguese (pt-BR). Keep it that way.
 
 ## Commands
 
@@ -19,15 +19,16 @@ Screenshot mode, used to check the UI without clicking through it:
 
 ## Architecture
 
-The app is a single iced `application`. `Code` in `src/main.rs` is the whole state, and `Msg` is the only message enum. `update`/`view`/`subscription` live there. The other modules hold pure logic or view pieces that `main.rs` calls. They reach back into it with `use crate::*`.
+The app is a single `pelicano::App` (`pelicano::run`). `Code` in `src/main.rs` is the whole state, and `Msg` is the only message enum. `update`/`view`/`subscription` live there. The other modules hold pure logic or view pieces that `main.rs` calls. They reach back into it with `use crate::*`.
 
-- **`agente.rs`**: talks to the installed `claude` CLI over the Agent SDK stream-json protocol, the same one the VS Code extension uses. It runs `--input-format/--output-format stream-json --permission-prompt-tool stdio --permission-mode <modo>` and exchanges one JSON per line. The stream is an iced `Subscription::run_with_id(("agente", self.conversa), …)`. To restart the process, bump `Code::conversa` or set `ligado` to false. Dropping the stream kills the child (`kill_on_drop`). Permission requests come in as `control_request`, and the editor answers with `permitir`/`negar`. `interrupt`/`set_permission_mode` go out through `controle`. Each user message gets the `<contexto_do_editor>` block appended (open file + cursor line). It is built in `main.rs`.
+- **`agente.rs`**: talks to the installed `claude` CLI over the Agent SDK stream-json protocol, the same one the VS Code extension uses. It runs `--input-format/--output-format stream-json --permission-prompt-tool stdio --permission-mode <modo>` and exchanges one JSON per line. The stream is a pelicano `Subscription::run_with_id(("agente", self.conversa), …)`. To restart the process, bump `Code::conversa` or set `ligado` to false. Dropping the stream kills the child (`kill_on_drop`). Permission requests come in as `control_request`, and the editor answers with `permitir`/`negar`. `interrupt`/`set_permission_mode` go out through `controle`. Each user message gets the `<contexto_do_editor>` block appended (open file + cursor line). It is built in `main.rs`.
+- **`terminal.rs`**: terminal tabs over `pelicano::Terminal` (PTY). `Task::focus(("terminal", id))` moves the keyboard to one.
+- **`edicao.rs`**: Tab/Shift+Tab and comment on the `pelicano::Content` via `edit_lines`. Undo/redo, scroll, line numbers and highlighting belong to pelicano's `text_editor`.
 - **`execucao.rs`**: runs shell commands for the terminal and the Run button (F5). Output streams line by line and stops through a `oneshot`. `comando_do_projeto` picks the command from the project type: Cargo (in a workspace, the `crates/*-gui` crate), `package.json`, `main.py`…
 - **`inicio.rs`**: start page (recents, theme, detects `claude`/`codex`/`agy`, new project and clone). Its own message enum is `Ini`, wrapped in `Msg::Ini`.
 - **`modelos.rs`**: project templates as file lists. `{nome}` becomes the package name and `{modulo}` the snake_case name.
 - **`paineis.rs`**: left rail (Explorer, Search, Git), the search and Git panels, and the top menu.
 - **`arvore.rs`**: file tree. Folders are read lazily when expanded. The ignored folders are a fixed list (`IGNORADAS`), not `.gitignore`.
-- **`edicao.rs`**: Tab/Shift+Tab on the selection and Ctrl+; to comment, by file extension.
 - **`config.rs`**: theme, recents and preferences, stored as JSON in the system config folder (`dirs`).
 
 Colors, theme, icons, window chrome and the suite brand come from `feather-ui`, a git dependency pinned by tag in `Cargo.toml`. Reuse its `COR_*` and widgets before you write your own style.
@@ -54,7 +55,7 @@ Regra que vale para tudo: tela nova é desenhada no artifact primeiro
 - [ ] Ctrl+Enter faz o commit; botão Commit com seta: "Commit e Push", "Commit (só o preparado)".
 - [ ] Preparar/despreparar arquivo por arquivo (+ / −), como "Staged Changes".
 
-**Editor (feito em 19/10):** Ctrl+Z/Ctrl+Y com pilha própria (`edicao::Desfazer`); linha do
+**Editor (feito em 19/10):** Ctrl+Z/Ctrl+Y (hoje o do próprio `text_editor` do pelicano); linha do
 cursor destacada; trilho no estilo do VS Code; só a pena no topo.
 
 **Explorador**
@@ -98,7 +99,7 @@ cursor destacada; trilho no estilo do VS Code; só a pena no topo.
 - Não vale (por ora):
   - Workspaces (adicionar pasta ao workspace, salvar/duplicar workspace), perfis, Compartilhar,
     Emmet, Extensões.
-  - Multicursor (Ctrl+D, cursor acima/abaixo, seleção em coluna): o `text_editor` do Iced 0.13
+  - Multicursor (Ctrl+D, cursor acima/abaixo, seleção em coluna): o `text_editor` do pelicano
     não tem; só com editor próprio.
   - Expandir/encolher seleção: precisa da árvore de sintaxe.
   - Depurador (breakpoints, passo a passo, Debug Console): exige DAP, é projeto à parte.
@@ -109,8 +110,9 @@ cursor destacada; trilho no estilo do VS Code; só a pena no topo.
 
 **Menu do botão direito (pedido em 19/10; hoje não existe nenhum)** — mesmo visual do menu
 do topo, só com o que funciona:
-- [ ] Editor: Recortar, Copiar, Colar, Selecionar tudo · Comentar linha · Rodar seleção no
-      terminal · Perguntar ao agente sobre a seleção.
+- [x] Editor (21/10): Recortar, Copiar, Colar · Comentar linha · Rodar seleção no terminal ·
+      Mandar seleção (ou a linha) ao agente, que vira o chip `arquivo 300:500` no chat.
+      Falta Selecionar tudo: o `Content` do pelicano não tem como selecionar pelo app (Ctrl+A funciona).
 - [ ] Explorador: Abrir, Ver alterações (se mudou), Copiar caminho / caminho relativo,
       Renomear, Excluir (com confirmação); na pasta também Novo arquivo, Nova pasta, Abrir no terminal.
 - [ ] Aba: Fechar, Fechar as outras, Fechar todas, Copiar caminho.

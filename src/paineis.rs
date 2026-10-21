@@ -1,7 +1,7 @@
 //! Trilho da esquerda (Explorador, Buscar, Git, Agente), os painéis de busca e de Git e o menu do topo.
 use crate::config::Tema;
 use crate::*;
-use iced::widget::{column, row};
+use pelicano::{column, row, stack};
 
 pub const LARGURA_TRILHO: f32 = 44.0;
 const MAX_ACHADOS: usize = 500;
@@ -389,6 +389,19 @@ pub const MENUS: [(&str, f32); 4] = [
 /// Largura da pena antes dos menus.
 pub const LARGURA_MARCA: f32 = 30.0;
 
+
+/// Ícone do trilho na cor pedida; sem o SVG, fica o espaço dele.
+fn icone_svg<'a>(fonte: &str, tamanho: f32, cor: Color) -> Element<'a, Msg> {
+    match pelicano::Svg::from_bytes(fonte.as_bytes()) {
+        Some(s) => pelicano::svg(s)
+            .width(tamanho)
+            .height(tamanho)
+            .color(cor)
+            .into(),
+        None => Space::new(tamanho, tamanho).into(),
+    }
+}
+
 impl Code {
     pub(crate) fn trilho_view(&self) -> Element<'_, Msg> {
         // Como a barra de atividades do VS Code: ícone em traço, o ativo em cor de destaque
@@ -398,50 +411,42 @@ impl Code {
                      ativo: bool,
                      msg: Msg|
          -> Element<'static, Msg> {
+            // shortcut: o ícone não clareia no hover (o svg do pelicano não sabe do botão); o fundo clareia.
             let b = button(
-                container(
-                    iced::widget::svg(iced::widget::svg::Handle::from_memory(icone.as_bytes()))
-                        .width(22)
-                        .height(22)
-                        .style(move |_, s| iced::widget::svg::Style {
-                            color: Some(
-                                if ativo || matches!(s, iced::widget::svg::Status::Hovered) {
-                                    if ativo {
-                                        COR_AZUL_ACENTO()
-                                    } else {
-                                        COR_TEXTO()
-                                    }
-                                } else {
-                                    COR_TEXTO_MUTED()
-                                },
-                            ),
-                        }),
-                )
-                .center(Length::Fill),
+                container(icone_svg(
+                    icone,
+                    22.0,
+                    if ativo {
+                        COR_AZUL_ACENTO()
+                    } else {
+                        COR_TEXTO_MUTED()
+                    },
+                ))
+                .center()
+                .width(Length::FILL)
+                .height(Length::FILL),
             )
             .on_press(msg)
-            .width(Length::Fill)
-            .height(44)
+            .width(Length::FILL)
+            .height(44.0)
             .padding(0)
-            .style(|_, _| button::Style::default());
-            let filete = container(Space::new(2, 24)).style(move |_| container::Style {
-                border: Border {
-                    radius: 1.0.into(),
-                    ..Default::default()
-                },
-                ..fundo(if ativo {
-                    COR_AZUL_ACENTO()
-                } else {
-                    Color::TRANSPARENT
-                })
+            .style(|_, s| item_lista(false, s, 5.0));
+            let filete = container(Space::new(2.0, 24.0)).style(move |_| {
+                Style::default()
+                    .background(if ativo {
+                        COR_AZUL_ACENTO()
+                    } else {
+                        Color::TRANSPARENT
+                    })
+                    .border(Border::rounded(1.0))
             });
             tooltip(
-                row![filete, b].align_y(Alignment::Center),
-                container(text(dica).size(12))
-                    .padding([4, 8])
-                    .style(tema::estilo_dica),
-                tooltip::Position::Right,
+                row![filete, b].align(Align::Center),
+                dica,
+                TooltipPosition::Right,
             )
+            .padding([4, 8])
+            .style(tema::estilo_dica)
             .into()
         };
         let lado = self.lado;
@@ -470,30 +475,39 @@ impl Code {
                 self.agente_aberto,
                 Msg::AlternarAgente
             ),
-            Space::with_height(Length::Fill),
+            Space::new(0.0, Length::FILL),
             tooltip(
-                button(icone_traco("settings", 22.0))
-                    .on_press(Msg::Configuracoes(Some(0)))
-                    .width(Length::Fill)
-                    .height(44)
-                    .style(|_, s| item_lista(false, s, 5.0)),
+                button(
+                    container(icone_traco("settings", 22.0))
+                        .center()
+                        .width(Length::FILL)
+                        .height(Length::FILL)
+                )
+                .on_press(Msg::Configuracoes(Some(0)))
+                .width(Length::FILL)
+                .height(44.0)
+                .padding(0)
+                .style(|_, s| item_lista(false, s, 5.0)),
                 "Configurações  Ctrl+,",
-                tooltip::Position::Right,
-            ),
+                TooltipPosition::Right,
+            )
+            .padding([4, 8])
+            .style(tema::estilo_dica),
         ]
         .padding([4, 0])
         .width(LARGURA_TRILHO)
-        .height(Length::Fill)
+        .height(Length::FILL)
         .into()
     }
 
     /// O painel ao lado do trilho, conforme o botão escolhido.
-    /// O Git é mais largo: as mensagens dos commits precisam de espaço.
+    /// O Git é mais largo: as mensagens dos commits precisam de espaço. Depois de arrastar, vale a escolhida.
     pub(crate) fn largura_lado(&self) -> f32 {
-        match self.lado {
-            Some(Lado::Git) => 360.0,
-            Some(_) => LARGURA_ARVORE,
-            None => 0.0,
+        match (self.lado, self.largura_lado) {
+            (None, _) => 0.0,
+            (Some(_), Some(l)) => l,
+            (Some(Lado::Git), None) => 360.0,
+            (Some(_), None) => LARGURA_ARVORE,
         }
     }
 
@@ -506,32 +520,20 @@ impl Code {
         Some(
             container(corpo)
                 .width(self.largura_lado())
-                .height(Length::Fill)
+                .height(Length::FILL)
                 .style(|_| fundo(COR_PAINEL_FAIXA()))
                 .into(),
         )
     }
 
     fn busca_view(&self) -> Element<'_, Msg> {
-        let campo = text_input("Buscar nos arquivos", &self.busca)
-            .id(text_input::Id::new("busca"))
+        let campo = text_input("Buscar nos arquivos", self.busca.as_str())
+            .id("busca")
             .on_input(Msg::Busca)
             .on_submit(Msg::BuscarAgora)
             .size(13)
             .padding([6, 8])
-            .style(|t, s| text_input::Style {
-                border: Border {
-                    color: if matches!(s, text_input::Status::Focused) {
-                        COR_AZUL_ACENTO()
-                    } else {
-                        COR_BORDA()
-                    },
-                    width: 1.0,
-                    radius: 6.0.into(),
-                },
-                background: COR_PAINEL().into(),
-                ..campo_sem_borda(t, s)
-            });
+            .style(campo(COR_PAINEL()));
         let resumo = if self.buscando {
             "Procurando…".to_string()
         } else if let Some(a) = &self.achados {
@@ -545,7 +547,7 @@ impl Code {
         } else {
             "Enter para buscar.".into()
         };
-        let mut lista = Column::new();
+        let mut lista = column![].width(Length::FILL);
         let mut ultimo: Option<&Path> = None;
         for a in self.achados.iter().flatten() {
             if ultimo != Some(a.caminho.as_path()) {
@@ -556,7 +558,7 @@ impl Code {
                             .size(12)
                             .font(NEGRITO),
                     )
-                    .padding(iced::Padding {
+                    .padding(Padding {
                         top: 8.0,
                         right: 12.0,
                         bottom: 2.0,
@@ -569,14 +571,15 @@ impl Code {
                     .font(MONO)
                     .size(11)
                     .color(COR_TEXTO_MUTED())
-                    .width(34),
-                text(&a.texto).font(MONO).size(11).wrapping(Wrapping::None)
+                    .width(34.0),
+                text(a.texto.as_str()).font(MONO).size(11).no_wrap()
             ]
-            .spacing(4);
+            .spacing(4)
+            .width(Length::FILL);
             lista = lista.push(
                 button(linha)
                     .on_press(Msg::IrPara(a.caminho.clone(), a.linha))
-                    .width(Length::Fill)
+                    .width(Length::FILL)
                     .padding([2, 12])
                     .style(|_, s| item_lista(false, s, 0.0)),
             );
@@ -590,10 +593,9 @@ impl Code {
                 ]
                 .spacing(8)
             )
-            .padding([10, 12]),
-            tema::rolagem(lista)
-                .height(Length::Fill)
-                .style(rolagem_discreta)
+            .padding([10, 12])
+            .width(Length::FILL),
+            rolagem(lista).height(Length::FILL)
         ]
         .into()
     }
@@ -608,7 +610,7 @@ impl Code {
             botao_icone("refresh", Msg::GitAtualizar)
         ]
         .spacing(2)
-        .align_y(Alignment::Center);
+        .align(Align::Center);
         let ramo = text(
             self.ramo
                 .as_deref()
@@ -618,52 +620,35 @@ impl Code {
         .color(COR_TEXTO_MUTED());
         let corpo: Element<Msg> = match &self.git {
             None => text("Lendo…").size(12).color(COR_TEXTO_MUTED()).into(),
-            Some(Err(e)) => container(text(e).size(12).color(COR_ERRO()))
+            Some(Err(e)) => container(text(e.as_str()).size(12).color(COR_ERRO()))
                 .padding([0, 12])
                 .into(),
             Some(Ok(g)) => {
-                let mensagem = text_input("Mensagem do commit", &self.mensagem_commit)
+                let mensagem = text_input("Mensagem do commit", self.mensagem_commit.as_str())
                     .on_input(Msg::MensagemCommit)
                     .on_submit(Msg::Commit)
                     .size(13)
                     .padding([6, 8])
-                    .style(|t, s| text_input::Style {
-                        border: Border {
-                            color: if matches!(s, text_input::Status::Focused) {
-                                COR_AZUL_ACENTO()
-                            } else {
-                                COR_BORDA()
-                            },
-                            width: 1.0,
-                            radius: 6.0.into(),
-                        },
-                        background: COR_PAINEL().into(),
-                        ..campo_sem_borda(t, s)
-                    });
+                    .style(campo(COR_PAINEL()));
                 let pode = !g.mudancas.is_empty() && !self.mensagem_commit.trim().is_empty();
                 let commit = button(
                     container(text("Commit").size(12).font(NEGRITO).color(COR_PAINEL()))
-                        .center_x(Length::Fill),
+                        .width(Length::FILL)
+                        .align_x(Align::Center),
                 )
                 .on_press_maybe(pode.then_some(Msg::Commit))
-                .width(Length::Fill)
+                .width(Length::FILL)
                 .padding([5, 8])
-                .style(move |_, s| button::Style {
-                    background: Some(
-                        if pode && matches!(s, button::Status::Hovered) {
-                            COR_AZUL_ACENTO().scale_alpha(0.85)
+                .style(move |_, s| {
+                    Style::default()
+                        .background(if pode && matches!(s, Status::Hovered) {
+                            COR_AZUL_ACENTO().alpha(0.85)
                         } else if pode {
                             COR_AZUL_ACENTO()
                         } else {
                             COR_BORDA()
-                        }
-                        .into(),
-                    ),
-                    border: Border {
-                        radius: 6.0.into(),
-                        ..Border::default()
-                    },
-                    ..button::Style::default()
+                        })
+                        .border(Border::rounded(6.0))
                 });
                 let gerar = button(
                     text(if self.titulo_pendente.is_some() {
@@ -679,13 +664,14 @@ impl Code {
                 )
                 .padding([5, 8])
                 .style(|_, s| item_lista(false, s, 5.0));
-                let mut c = Column::new()
-                    .push(
-                        container(column![mensagem, row![commit, gerar].spacing(6)].spacing(6))
-                            .padding([4, 12]),
-                    )
-                    .push(Space::with_height(6))
-                    .push(subtitulo_git(format!("Mudanças ({})", g.mudancas.len())));
+                let mut c = column![
+                    container(column![mensagem, row![commit, gerar].spacing(6)].spacing(6))
+                        .padding([4, 12])
+                        .width(Length::FILL),
+                    Space::new(0.0, 6.0),
+                    subtitulo_git(format!("Mudanças ({})", g.mudancas.len()))
+                ]
+                .width(Length::FILL);
                 if g.mudancas.is_empty() {
                     c = c.push(
                         container(
@@ -700,7 +686,7 @@ impl Code {
                     c = c.push(self.linha_mudanca(sigla, p, Msg::VerDiff(p.clone()), 12.0));
                 }
                 c = c
-                    .push(Space::with_height(10))
+                    .push(Space::new(0.0, 10.0))
                     .push(subtitulo_git("Gráfico".into()));
                 for l in &g.grafo {
                     let aberto = self
@@ -719,14 +705,13 @@ impl Code {
                         }
                     }
                 }
-                tema::rolagem(c)
-                    .height(Length::Fill)
-                    .style(rolagem_discreta)
-                    .into()
+                rolagem(c).height(Length::FILL).into()
             }
         };
         column![
-            container(column![topo, ramo].spacing(6)).padding([10, 12]),
+            container(column![topo, ramo].spacing(6))
+                .padding([10, 12])
+                .width(Length::FILL),
             corpo
         ]
         .into()
@@ -828,7 +813,7 @@ impl Code {
                         self.config.tema == t,
                     ));
                 }
-                for (n, t) in highlighter::Theme::ALL.iter().enumerate() {
+                for (n, t) in Highlight::ALL.iter().enumerate() {
                     v.push((
                         nome_tema(*t),
                         if n == 0 { "§Cores do código" } else { "" },
@@ -863,102 +848,144 @@ impl Code {
             .map(|(i, (nome, largura))| {
                 let aberto = self.menu == Some(i);
                 button(
-                    text(*nome)
-                        .size(12)
-                        .color(if aberto {
-                            COR_TEXTO()
-                        } else {
-                            COR_TEXTO_MUTED()
-                        })
-                        .center(),
+                    container(text(*nome).size(12).color(if aberto {
+                        COR_TEXTO()
+                    } else {
+                        COR_TEXTO_MUTED()
+                    }))
+                    .width(Length::FILL)
+                    .align_x(Align::Center),
                 )
                 .on_press(Msg::Menu(if aberto { None } else { Some(i) }))
                 .width(*largura)
                 .padding([4, 0])
-                .style(move |_, s| button::Style {
-                    background: (aberto || matches!(s, button::Status::Hovered))
-                        .then(|| COR_HOVER().into()),
-                    border: Border {
-                        radius: 5.0.into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
+                .style(move |_, s| {
+                    let estilo = Style::default().border(Border::rounded(5.0));
+                    if aberto || matches!(s, Status::Hovered) {
+                        estilo.background(COR_HOVER())
+                    } else {
+                        estilo
+                    }
                 })
                 .into()
             });
-        iced::widget::Row::with_children(botoes).into()
+        row(botoes).into()
     }
 
     /// Camada por cima da janela com o menu aberto; clicar fora fecha.
     pub(crate) fn menu_aberto_view(&self) -> Option<Element<'_, Msg>> {
         let i = self.menu?;
         let x = 12.0 + LARGURA_MARCA + MENUS[..i].iter().map(|m| m.1).sum::<f32>();
-        let mut lista = Column::new().spacing(1);
-        let mut primeiro = true;
-        for (rotulo, atalho, msg, marcado) in self.itens_menu(i) {
-            // Atalho começando com § abre uma seção com esse título antes do item.
-            if let Some(titulo) = atalho.strip_prefix('§') {
-                if !primeiro {
-                    lista = lista.push(linha_horizontal());
-                }
+        Some(menu_flutuante(
+            self.itens_menu(i),
+            Point::new(x, cromo::BARRA_ALTURA),
+            Msg::Menu(None),
+        ))
+    }
+
+    /// Menu do botão direito no editor: o mesmo visual do menu do topo, aberto onde clicou.
+    pub(crate) fn menu_contexto_view(&self) -> Option<Element<'_, Msg>> {
+        let p = self.contexto?;
+        let aba = self.aba()?;
+        let selecao = aba.conteudo.selection().is_some_and(|s| !s.is_empty());
+        let mut itens: Vec<Item> = Vec::new();
+        if selecao {
+            itens.push(("Recortar", "Ctrl+X", Msg::Recortar, false));
+            itens.push(("Copiar", "Ctrl+C", Msg::CopiarSelecao, false));
+        }
+        itens.push(("Colar", "Ctrl+V", Msg::Colar, false));
+        itens.push(("Comentar linha", "§|Ctrl+/", Msg::Comentar, false));
+        if selecao {
+            itens.push(("Rodar seleção no terminal", "§", Msg::RodarSelecao, false));
+        }
+        itens.push((
+            if selecao {
+                "Mandar seleção ao agente"
+            } else {
+                "Mandar linha ao agente"
+            },
+            if selecao { "" } else { "§" },
+            Msg::MandarTrecho,
+            false,
+        ));
+        // O menu não pode sair da janela: perto da borda, abre para o lado de dentro.
+        let altura = itens.len() as f32 * 28.0 + 24.0;
+        let x = p.x.min(self.tamanho.width - LARGURA_MENU - 8.0).max(0.0);
+        let y = p.y.min(self.tamanho.height - altura - 8.0).max(0.0);
+        Some(menu_flutuante(itens, Point::new(x, y), Msg::MenuContexto(None)))
+    }
+}
+
+const LARGURA_MENU: f32 = 250.0;
+
+/// Caixa de menu por cima da janela, com o canto de cima à esquerda em `canto`; clicar fora manda `fechar`.
+/// Atalho começando com § abre uma seção: com título, ou só o traço se o título for vazio.
+/// `§título|atalho` abre a seção e ainda mostra o atalho do item.
+fn menu_flutuante<'a>(itens: Vec<Item>, canto: Point, fechar: Msg) -> Element<'a, Msg> {
+    let mut lista = column![].spacing(1).width(Length::FILL);
+    let mut primeiro = true;
+    for (rotulo, atalho, msg, marcado) in itens {
+        let (secao, atalho) = match atalho.strip_prefix('§') {
+            Some(resto) => {
+                let (titulo, atalho) = resto.split_once('|').unwrap_or((resto, ""));
+                (Some(titulo), atalho)
+            }
+            None => (None, atalho),
+        };
+        if let Some(titulo) = secao {
+            if !primeiro {
+                lista = lista.push(linha_horizontal());
+            }
+            if !titulo.is_empty() {
                 lista = lista.push(
                     container(text(titulo).size(11).color(COR_TEXTO_MUTED())).padding([4, 10]),
                 );
             }
-            let marca: Element<Msg> = if marcado {
-                icone_traco("check", 13.0).into()
-            } else {
-                Space::with_width(13).into()
-            };
-            primeiro = false;
-            let atalho_txt = if atalho.starts_with('§') { "" } else { atalho };
-            lista = lista.push(
-                button(
-                    row![
-                        marca,
-                        text(rotulo).size(12).width(Length::Fill),
-                        text(atalho_txt).size(11).color(COR_TEXTO_MUTED())
-                    ]
-                    .spacing(8)
-                    .align_y(Alignment::Center),
-                )
-                .on_press(msg)
-                .width(Length::Fill)
-                .padding([5, 10])
-                .style(|_, s| item_lista(false, s, 5.0)),
-            );
         }
-        let caixa = container(lista)
-            .width(250)
-            .padding(4)
-            .style(|_| container::Style {
-                border: Border {
-                    color: COR_BORDA(),
-                    width: 1.0,
-                    radius: 8.0.into(),
-                },
-                shadow: iced::Shadow {
-                    color: Color::from_rgba(0.0, 0.0, 0.0, 0.3),
-                    offset: iced::Vector::new(0.0, 8.0),
-                    blur_radius: 24.0,
-                },
-                ..fundo(COR_PAINEL())
-            });
-        let fundo_clique =
-            mouse_area(container(Space::new(Length::Fill, Length::Fill))).on_press(Msg::Menu(None));
-        Some(
-            stack![
-                fundo_clique,
-                container(caixa).padding(iced::Padding {
-                    top: cromo::BARRA_ALTURA,
-                    left: x,
-                    right: 0.0,
-                    bottom: 0.0
-                })
-            ]
-            .into(),
-        )
+        let marca: Element<Msg> = if marcado {
+            icone_traco("check", 13.0).into()
+        } else {
+            Space::new(13.0, 0.0).into()
+        };
+        primeiro = false;
+        lista = lista.push(
+            button(
+                row![
+                    marca,
+                    text(rotulo).size(12).width(Length::FILL),
+                    text(atalho).size(11).color(COR_TEXTO_MUTED())
+                ]
+                .spacing(8)
+                .align(Align::Center),
+            )
+            .on_press(msg)
+            .width(Length::FILL)
+            .padding([5, 10])
+            .style(|_, s| item_lista(false, s, 5.0)),
+        );
     }
+    let caixa = container(lista).width(LARGURA_MENU).padding(4).style(|_| {
+        fundo(COR_PAINEL())
+            .border(Border::rounded(8.0).color(COR_BORDA(), 1.0))
+            .shadow(Shadow {
+                color: Color::rgba(0.0, 0.0, 0.0, 0.3),
+                offset: Point::new(0.0, 8.0),
+                blur: 24.0,
+            })
+    });
+    let fundo_clique = mouse_area(Space::new(Length::FILL, Length::FILL)).on_press(fechar);
+    stack![
+        fundo_clique,
+        container(caixa).padding(Padding {
+            top: canto.y,
+            left: canto.x,
+            right: 0.0,
+            bottom: 0.0
+        })
+    ]
+    .width(Length::FILL)
+    .height(Length::FILL)
+    .into()
 }
 
 /// Botão de texto do topo do painel Git; o comando roda no terminal.
@@ -968,9 +995,10 @@ fn botao_git(rotulo: &'static str, comando: &'static str) -> Element<'static, Ms
             .on_press(Msg::GitRemoto(comando))
             .padding([2, 6])
             .style(|_, s| item_lista(false, s, 4.0)),
-        container(text(format!("git {comando}")).size(11).font(MONO)).padding([3, 6]),
-        tooltip::Position::Bottom,
+        format!("git {comando}"),
+        TooltipPosition::Bottom,
     )
+    .padding([3, 6])
     .style(tema::estilo_dica)
     .into()
 }
@@ -984,11 +1012,11 @@ fn subtitulo_git(t: String) -> Element<'static, Msg> {
 /// Cor de cada ramo pela coluna do desenho, para os ramos se distinguirem.
 fn cor_do_ramo(coluna: usize) -> Color {
     const CORES: [Color; 5] = [
-        Color::from_rgb(0.71, 0.61, 0.96),
-        Color::from_rgb(0.42, 0.75, 0.5),
-        Color::from_rgb(0.9, 0.7, 0.25),
-        Color::from_rgb(0.4, 0.68, 0.96),
-        Color::from_rgb(0.93, 0.5, 0.6),
+        Color::rgb(0.71, 0.61, 0.96),
+        Color::rgb(0.42, 0.75, 0.5),
+        Color::rgb(0.9, 0.7, 0.25),
+        Color::rgb(0.4, 0.68, 0.96),
+        Color::rgb(0.93, 0.5, 0.6),
     ];
     CORES[(coluna / 2) % CORES.len()]
 }
@@ -1010,14 +1038,14 @@ impl Code {
         let nome = self.relativo(p).display().to_string();
         button(
             row![
-                text(nome).size(12).width(Length::Fill),
+                text(nome).size(12).width(Length::FILL),
                 text(sigla.to_string()).font(MONO).size(11).color(cor)
             ]
             .spacing(6),
         )
         .on_press(ao_clicar)
-        .width(Length::Fill)
-        .padding(iced::Padding {
+        .width(Length::FILL)
+        .padding(Padding {
             top: 3.0,
             bottom: 3.0,
             left: recuo,
@@ -1030,21 +1058,21 @@ impl Code {
 
 /// Linha do gráfico; clicar num commit abre (ou fecha) a lista de arquivos dele.
 fn linha_grafo(l: &LinhaGrafo, aberto: bool) -> Element<'_, Msg> {
-    let desenho = iced::widget::Row::with_children(l.grafo.chars().enumerate().map(|(i, ch)| {
+    let desenho = row(l.grafo.chars().enumerate().map(|(i, ch)| {
         let simbolo = if ch == '*' { '●' } else { ch };
         text(simbolo.to_string())
             .font(MONO)
             .size(if ch == '*' { 10 } else { 12 })
             .color(cor_do_ramo(i))
-            .width(7)
-            .line_height(iced::widget::text::LineHeight::Absolute(18.into()))
-            .center()
+            .width(7.0)
+            .height(18.0)
+            .align_x(Align::Center)
             .into()
     }));
     let Some(c) = &l.commit else {
-        return container(desenho).padding([0, 12]).height(18).into();
+        return container(desenho).padding([0, 12]).height(18.0).into();
     };
-    let mut linha = row![desenho].spacing(6).align_y(Alignment::Center);
+    let mut linha = row![desenho].spacing(6).align(Align::Center);
     for r in &c.refs {
         let cabeca = r.starts_with("HEAD");
         let nome = r.trim_start_matches("HEAD -> ").trim_start_matches("tag: ");
@@ -1055,44 +1083,27 @@ fn linha_grafo(l: &LinhaGrafo, aberto: bool) -> Element<'_, Msg> {
                 COR_TEXTO()
             }))
             .padding([0, 4])
-            .style(move |_| container::Style {
-                border: Border {
-                    color: COR_AZUL_ACENTO(),
-                    width: 1.0,
-                    radius: 4.0.into(),
-                },
-                ..fundo(if cabeca {
+            .style(move |_| {
+                fundo(if cabeca {
                     COR_AZUL_ACENTO()
                 } else {
                     Color::TRANSPARENT
                 })
+                .border(Border::rounded(4.0).color(COR_AZUL_ACENTO(), 1.0))
             }),
         );
     }
-    linha = linha.push(
-        text(c.assunto.clone())
-            .size(12)
-            .wrapping(iced::widget::text::Wrapping::None),
-    );
-    let dica = container(
-        column![
-            text(c.assunto.clone()).size(12),
-            text(format!("{} · {} · {}", c.hash, c.autor, c.quando))
-                .size(11)
-                .font(MONO)
-                .color(COR_TEXTO_MUTED())
-        ]
-        .spacing(4)
-        .max_width(420),
-    )
-    .padding([6, 8])
-    .style(tema::estilo_dica);
-    let botao = button(container(linha).height(18).clip(true))
+    linha = linha.push(text(c.assunto.as_str()).size(12).no_wrap());
+    let dica = format!("{}\n{} · {} · {}", c.assunto, c.hash, c.autor, c.quando);
+    let botao = button(container(linha).width(Length::FILL).height(18.0).clip(true))
         .on_press(Msg::AbrirCommit(c.hash.clone()))
-        .width(Length::Fill)
+        .width(Length::FILL)
         .padding([0, 12])
         .style(move |_, s| item_lista(aberto, s, 0.0));
-    tooltip(botao, dica, tooltip::Position::Right).into()
+    tooltip(botao, dica, TooltipPosition::Right)
+        .padding([6, 8])
+        .style(tema::estilo_dica)
+        .into()
 }
 
 fn titulo_lado(t: &str) -> Element<'_, Msg> {
@@ -1103,15 +1114,16 @@ fn titulo_lado(t: &str) -> Element<'_, Msg> {
         .into()
 }
 
-pub fn nome_tema(t: highlighter::Theme) -> &'static str {
+pub fn nome_tema(t: Highlight) -> &'static str {
     match t {
-        highlighter::Theme::SolarizedDark => "Solarized escuro",
-        highlighter::Theme::Base16Mocha => "Mocha",
-        highlighter::Theme::Base16Ocean => "Oceano",
-        highlighter::Theme::Base16Eighties => "Anos 80",
-        highlighter::Theme::InspiredGitHub => "GitHub claro",
+        Highlight::SolarizedDark => "Solarized escuro",
+        Highlight::Base16Mocha => "Mocha",
+        Highlight::Base16Ocean => "Oceano",
+        Highlight::Base16Eighties => "Anos 80",
+        Highlight::InspiredGitHub => "GitHub claro",
     }
 }
+
 
 #[cfg(test)]
 mod testes {

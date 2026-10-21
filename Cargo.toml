@@ -9,19 +9,23 @@ repository = "https://github.com/feather-works/feathercode"
 publish = false
 
 [dependencies]
-feather-ui = { git = "https://github.com/feather-works/feather-ui", tag = "v0.2.10" }
-iced = { version = "0.13", features = ["svg", "tokio", "highlighter", "markdown", "auto-detect-theme", "canvas"] }
+# shortcut: caminhos locais enquanto o pelicano novo e a porta do feather-ui não têm tag; trocar por git + tag ao publicar.
+feather-ui = { path = "../feather-ui-pelicano" }
+pelicano = { path = "../pelicano", features = ["terminal", "highlighter"] }
 # Mesma escolha do FeatherSheet: diálogo nativo pelo portal, sem GTK.
 rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
 serde_json = "1"
 # Pasta de configuração de cada sistema (o launcher usa o mesmo).
 dirs = "6"
-# Só o modo de captura (FEATHERCODE_CAPTURAR) grava PNG.
-image = { version = "0.25", default-features = false, features = ["png"] }
-tokio = { version = "1", features = ["process", "io-util", "macros", "sync", "rt", "time"] }
-# Terminal de verdade (PTY + emulador do Alacritty), na versão que usa o Iced 0.13.
-iced_term = "0.6.0"
+tokio = { version = "1", features = ["process", "io-util", "macros", "sync", "rt", "rt-multi-thread", "time"] }
 
 [profile.release]
 lto = "thin"
 strip = true
+
+# O pelicano desenha na CPU: sem otimizar, cada quadro leva centenas de ms (mesmas linhas do pelicano).
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
