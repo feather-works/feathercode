@@ -148,6 +148,7 @@ impl Code {
                 let mut lista = column![];
                 for (acao, tecla) in [
                     ("Configurações", "Ctrl+,"),
+                    ("Novo arquivo", "Ctrl+N"),
                     ("Abrir pasta", "Ctrl+O"),
                     ("Abrir arquivo", "Ctrl+Shift+O"),
                     ("Salvar", "Ctrl+S"),

@@ -118,6 +118,9 @@ enum Msg {
     AbrirPasta,
     EscolherArquivo,
     ArquivoEscolhido(Option<PathBuf>),
+    /// Arquivo ▸ Novo arquivo…: pergunta nome e pasta, cria vazio e abre.
+    NovoArquivo,
+    NovoArquivoEscolhido(Option<PathBuf>),
     SalvarTudo,
     AtualizarArvore,
     RecolherArvore,
@@ -372,6 +375,7 @@ impl pelicano::App for Code {
                 "s" | "S" if ctrl && shift => Some(Msg::SalvarTudo),
                 "s" if ctrl => Some(Msg::Salvar),
                 "o" | "O" if ctrl && shift => Some(Msg::EscolherArquivo),
+                "n" if ctrl => Some(Msg::NovoArquivo),
                 "e" | "E" if ctrl && shift => Some(Msg::Lado(Lado::Explorador)),
                 "g" | "G" if ctrl && shift => Some(Msg::Lado(Lado::Git)),
                 "f" | "F" if ctrl && shift => Some(Msg::Lado(Lado::Buscar)),
@@ -1004,6 +1008,39 @@ impl Code {
                 return Task::batch([abrir, Task::done(Msg::AbrirArquivo(p))]);
             }
             Msg::ArquivoEscolhido(None) => {}
+            Msg::NovoArquivo => {
+                // Começa na pasta do arquivo aberto (como o VS Code), senão na raiz do projeto.
+                let pasta = self
+                    .aba()
+                    .and_then(|a| a.caminho.parent().map(Path::to_path_buf))
+                    .unwrap_or_else(|| self.arvore.raiz.clone());
+                return Task::perform(
+                    rfd::AsyncFileDialog::new()
+                        .set_title("Novo arquivo")
+                        .set_directory(pasta)
+                        .set_file_name("sem_titulo.txt")
+                        .save_file(),
+                    |h| Msg::NovoArquivoEscolhido(h.map(|h| h.path().to_path_buf())),
+                );
+            }
+            Msg::NovoArquivoEscolhido(Some(p)) => {
+                // Se o nome já existe, só abre: nunca esvazia um arquivo que já tinha conteúdo.
+                if !p.exists() {
+                    if let Err(e) = std::fs::write(&p, "") {
+                        self.aviso = format!("Não deu para criar {}: {e}", p.display());
+                        return Task::none();
+                    }
+                }
+                let abrir = if self.inicio {
+                    p.parent()
+                        .map(|pai| self.abrir_pasta(pai.to_path_buf()))
+                        .unwrap_or_else(Task::none)
+                } else {
+                    Task::none()
+                };
+                return Task::batch([abrir, Task::done(Msg::AtualizarArvore), Task::done(Msg::AbrirArquivo(p))]);
+            }
+            Msg::NovoArquivoEscolhido(None) => {}
             Msg::AtualizarArvore => {
                 self.arvore.recarregar();
                 self.todos_arquivos = if self.filtro.trim().is_empty() {
@@ -2986,6 +3023,22 @@ fn rolagem<'a>(conteudo: impl Into<Element<'a, Msg>>) -> pelicano::Scrollable<'a
 
 #[cfg(test)]
 mod testes {
+    #[test]
+    fn novo_arquivo_cria_vazio_e_nao_esvazia_o_que_ja_existe() {
+        use super::*;
+        let pasta = std::env::temp_dir().join(format!("fc-novo-{}", std::process::id()));
+        std::fs::create_dir_all(&pasta).unwrap();
+        let (mut code, _) = Code::novo(config::Config::ler());
+        let novo = pasta.join("novo.rs");
+        let _ = code.update(Msg::NovoArquivoEscolhido(Some(novo.clone())));
+        assert_eq!(std::fs::read_to_string(&novo).unwrap(), "");
+        let existente = pasta.join("existente.rs");
+        std::fs::write(&existente, "fn main() {}").unwrap();
+        let _ = code.update(Msg::NovoArquivoEscolhido(Some(existente.clone())));
+        assert_eq!(std::fs::read_to_string(&existente).unwrap(), "fn main() {}");
+        std::fs::remove_dir_all(pasta).unwrap();
+    }
+
     #[test]
     fn chats_recebem_eventos_sem_perder_a_aba_ativa() {
         use super::*;

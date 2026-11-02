@@ -721,6 +721,7 @@ impl Code {
         match i {
             // Na página inicial não há pasta aberta: só o que funciona sem ela.
             0 if self.inicio => vec![
+                ("Novo arquivo…", "Ctrl+N", Msg::NovoArquivo, false),
                 ("Abrir pasta…", "Ctrl+O", Msg::AbrirPasta, false),
                 (
                     "Abrir arquivo…",
@@ -731,6 +732,7 @@ impl Code {
             ],
             0 => {
                 let mut v = vec![
+                    ("Novo arquivo…", "Ctrl+N", Msg::NovoArquivo, false),
                     ("Abrir pasta…", "Ctrl+O", Msg::AbrirPasta, false),
                     (
                         "Abrir arquivo…",
