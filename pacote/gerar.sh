@@ -80,6 +80,8 @@ for t in 16 24 32 48 64 128 256 512; do
   mkdir -p ~/.local/share/icons/hicolor/${t}x${t}/apps
   cp icones/feathercode-$t.png ~/.local/share/icons/hicolor/${t}x${t}/apps/feathercode.png
 done
+mkdir -p ~/.local/share/icons/hicolor/scalable/apps
+cp icones/feathercode.svg ~/.local/share/icons/hicolor/scalable/apps/feathercode.svg
 update-desktop-database ~/.local/share/applications 2>/dev/null || true
 echo "FeatherCode instalado. Procure por \"FeatherCode\" no menu de aplicativos."
 SH

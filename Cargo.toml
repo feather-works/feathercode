@@ -9,8 +9,8 @@ repository = "https://github.com/feather-works/feathercode"
 publish = false
 
 [dependencies]
-feather-ui = { git = "https://github.com/feather-works/feather-ui", tag = "v0.3.0" }
-pelicano = { git = "https://github.com/feather-works/pelicano.git", tag = "v0.1.9", features = ["terminal", "highlighter"] }
+feather-ui = { git = "https://github.com/feather-works/feather-ui.git", tag = "v0.3.10" }
+pelicano = { git = "https://github.com/feather-works/pelicano.git", tag = "v0.1.22", features = ["terminal", "highlighter"] }
 # Mesma escolha do FeatherSheet: diálogo nativo pelo portal, sem GTK.
 rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
 serde_json = "1"

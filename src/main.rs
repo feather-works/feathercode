@@ -401,6 +401,12 @@ impl Code {
             .filter(|_| !cfg!(test))
             .map(PathBuf::from)
             .map(|p| p.canonicalize().unwrap_or(p));
+        // "Abrir com" (Windows e .desktop) passa um arquivo: abre a pasta dele e o arquivo.
+        let arquivo_pedido = pedida.clone().filter(|p| p.is_file());
+        let pedida = match &arquivo_pedido {
+            Some(a) => a.parent().map(PathBuf::from),
+            None => pedida,
+        };
         if let Some(p) = &pedida {
             config.usar_pasta(p.clone());
         }
@@ -452,6 +458,9 @@ impl Code {
             if let Err(e) = code.terminais.novo(&code.arvore.raiz.clone(), None) {
                 code.aviso = e;
             }
+        }
+        if let Some(a) = arquivo_pedido {
+            let _ = code.update(Msg::AbrirArquivo(a));
         }
         // Modo de captura: FEATHERCODE_CAPTURAR=foto.png fotografa a janela e fecha;
         // FEATHERCODE_CAPTURAR_ARQUIVO abre um arquivo e FEATHERCODE_CAPTURAR_EXEMPLO=1 põe uma conversa de exemplo.
@@ -965,6 +974,17 @@ impl Code {
                     rfd::AsyncFileDialog::new()
                         .set_title("Abrir arquivo")
                         .set_directory(&self.arvore.raiz)
+                        // O primeiro filtro é o que vem marcado: editor de código abre qualquer texto.
+                        .add_filter("Todos os arquivos", &["*"])
+                        .add_filter("Rust", &["rs"])
+                        .add_filter("Python", &["py"])
+                        .add_filter("JavaScript e TypeScript", &["js", "jsx", "ts", "tsx", "mjs", "cjs"])
+                        .add_filter("C, C++ e C#", &["c", "h", "cpp", "hpp", "cc", "cs"])
+                        .add_filter("Go, Java e Kotlin", &["go", "java", "kt"])
+                        .add_filter("Web", &["html", "htm", "css", "scss", "xml", "svg"])
+                        .add_filter("Configuração", &["json", "toml", "yaml", "yml", "ini", "cfg", "env"])
+                        .add_filter("Scripts", &["sh", "bash", "ps1", "bat", "lua", "rb", "php", "sql"])
+                        .add_filter("Texto e Markdown", &["txt", "md", "log", "csv"])
                         .pick_file(),
                     |h| Msg::ArquivoEscolhido(h.map(|h| h.path().to_path_buf())),
                 );
