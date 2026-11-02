@@ -88,7 +88,7 @@ fn tecnologias(t: Tipo) -> Vec<Tec> {
 
 /// Versão de um programa pelo `--version`: a primeira palavra que começa com algarismo.
 async fn versao(programa: &str) -> Option<String> {
-    let saida = tokio::process::Command::new(programa)
+    let saida = crate::sistema::comando(programa)
         .arg("--version")
         .output()
         .await
@@ -137,7 +137,7 @@ fn nome_do_repositorio(url: &str) -> Option<&str> {
 }
 
 async fn clonar(url: String, destino: PathBuf) -> Result<PathBuf, String> {
-    let saida = tokio::process::Command::new("git")
+    let saida = crate::sistema::comando("git")
         .args(["clone", "--", &url])
         .arg(&destino)
         .output()
@@ -260,7 +260,7 @@ impl Code {
                 match modelos::criar(modelo, &self.ini.nome, &self.onde_criar()) {
                     Ok(raiz) => {
                         if self.config.iniciar_git {
-                            let git = std::process::Command::new("git")
+                            let git = crate::sistema::comando_std("git")
                                 .args(["init", "-q"])
                                 .current_dir(&raiz)
                                 .status();

@@ -10,6 +10,7 @@ mod inicio;
 mod modelos;
 mod paineis;
 mod preferencias;
+mod sistema;
 mod terminal;
 
 use agente::{Item, Resposta, Sinal};
@@ -1318,15 +1319,7 @@ impl Code {
                 }
             }
             Msg::Link(url) => {
-                #[cfg(target_os = "linux")]
-                let abrir = std::process::Command::new("xdg-open").arg(&url).spawn();
-                #[cfg(target_os = "windows")]
-                let abrir = std::process::Command::new("cmd")
-                    .args(["/C", "start", "", &url])
-                    .spawn();
-                #[cfg(target_os = "macos")]
-                let abrir = std::process::Command::new("open").arg(&url).spawn();
-                if let Err(e) = abrir {
+                if let Err(e) = sistema::abrir_link(&url) {
                     self.aviso = format!("Não deu para abrir o link: {e}");
                 }
             }

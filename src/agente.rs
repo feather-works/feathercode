@@ -127,7 +127,7 @@ fn processo(
     mut adaptador: Box<dyn Adaptador>,
 ) -> impl Stream<Item = Evento> {
     canal(move |mut saida| async move {
-        let filho = tokio::process::Command::new(programa)
+        let filho = crate::sistema::comando(programa)
             .args(&args)
             .current_dir(&pasta)
             .stdin(Stdio::piped())

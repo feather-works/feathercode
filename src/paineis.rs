@@ -138,7 +138,7 @@ fn ler_grafo(saida: &str) -> Vec<LinhaGrafo> {
 /// Mudanças (`git status`) e os últimos commits de todos os ramos com o desenho do grafo.
 pub async fn status_git(raiz: PathBuf) -> Result<EstadoGit, String> {
     let mudancas = mudancas_git(&raiz).await?;
-    let log = tokio::process::Command::new("git")
+    let log = crate::sistema::comando("git")
         .args([
             "log",
             "--graph",
@@ -164,7 +164,7 @@ pub async fn status_git(raiz: PathBuf) -> Result<EstadoGit, String> {
 /// Prepara tudo e faz o commit; a mensagem vai como argumento, sem passar por shell.
 pub async fn commit(raiz: PathBuf, mensagem: String) -> Result<(), String> {
     for args in [vec!["add", "-A"], vec!["commit", "-m", &mensagem]] {
-        let s = tokio::process::Command::new("git")
+        let s = crate::sistema::comando("git")
             .args(&args)
             .current_dir(&raiz)
             .output()
@@ -200,7 +200,7 @@ pub struct Diff {
 /// Diferença do arquivo contra o último commit; arquivo novo (ou repositório sem commit) aparece todo como adicionado.
 pub async fn diff_git(raiz: PathBuf, caminho: PathBuf) -> Result<Diff, String> {
     let rodar = |args: Vec<&std::ffi::OsStr>| {
-        tokio::process::Command::new("git")
+        crate::sistema::comando("git")
             .args(args)
             .current_dir(&raiz)
             .output()
@@ -236,7 +236,7 @@ pub async fn diff_git(raiz: PathBuf, caminho: PathBuf) -> Result<Diff, String> {
 
 /// O que um commit mudou nesse arquivo (contra o primeiro pai, se for merge).
 pub async fn diff_do_commit(raiz: PathBuf, hash: String, caminho: PathBuf) -> Result<Diff, String> {
-    let saida = tokio::process::Command::new("git")
+    let saida = crate::sistema::comando("git")
         .args([
             "show",
             "--format=",
@@ -264,7 +264,7 @@ pub async fn arquivos_do_commit(
     raiz: PathBuf,
     hash: String,
 ) -> Result<(String, Vec<(String, PathBuf)>), String> {
-    let saida = tokio::process::Command::new("git")
+    let saida = crate::sistema::comando("git")
         .args([
             "show",
             "--format=",
@@ -348,7 +348,7 @@ fn ler_diff(s: &str) -> Vec<LinhaDiff> {
 }
 
 async fn mudancas_git(raiz: &Path) -> Result<Vec<(String, PathBuf)>, String> {
-    let saida = tokio::process::Command::new("git")
+    let saida = crate::sistema::comando("git")
         .args(["status", "--porcelain=v1", "-uall"])
         .current_dir(raiz)
         .output()
@@ -1195,7 +1195,7 @@ mod testes {
 /// O commit atual inclui todas as mudanças rastreadas e os nomes dos arquivos novos.
 pub async fn titulo_por_ia(raiz: PathBuf, provedor: agente::Provedor) -> Result<String, String> {
     let executar = |args: Vec<&'static str>| {
-        tokio::process::Command::new("git")
+        crate::sistema::comando("git")
             .args(args)
             .current_dir(&raiz)
             .kill_on_drop(true)

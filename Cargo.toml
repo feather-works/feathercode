@@ -32,3 +32,7 @@ opt-level = 3
 [build-dependencies]
 # Ícone e nome do .exe do Windows (build.rs).
 embed-resource = "3"
+
+[target.'cfg(windows)'.dependencies]
+# Abrir link pela API do Windows (sistema.rs), sem cmd escondido.
+windows-sys = { version = "0.59", features = ["Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
