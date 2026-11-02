@@ -161,6 +161,8 @@ enum Msg {
     Arrastar,
     Minimizar,
     Maximizar,
+    /// A beirada da janela sem moldura do sistema: redimensionar (cromo::moldura_redimensionavel).
+    Puxar(pelicano::ResizeDirection),
     Fechar,
     Lado(Lado),
     AlternarAgente,
@@ -1352,6 +1354,7 @@ impl Code {
                 );
             }
             Msg::Minimizar => return Task::window(WindowCmd::Minimize),
+            Msg::Puxar(d) => return Task::window(WindowCmd::DragResize(d)),
             Msg::Maximizar => return Task::window(WindowCmd::ToggleMaximize),
             Msg::Fechar => return Task::window(WindowCmd::Close),
         }
@@ -1428,7 +1431,8 @@ impl Code {
                 .into(),
             None => janela,
         };
-        cromo::moldura_janela(janela)
+        // Com as beiradas de redimensionar: sem a moldura do sistema, só mudava de tamanho maximizando.
+        cromo::moldura_redimensionavel(janela, Msg::Puxar)
     }
 
     fn area_de_trabalho<'a>(&'a self, barra: Element<'a, Msg>) -> Element<'a, Msg> {

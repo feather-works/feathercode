@@ -3,7 +3,7 @@
 # launcher procura na release (releases/latest/download/<nome>):
 #   feathercode-linux-x86_64.tar.gz   Linux portátil (instalar.sh na pasta do usuário)
 #   feathercode-linux-amd64.deb       Debian, Ubuntu, Mint…
-#   FeatherCode-windows-x64.exe       Windows 10/11 (instalador por usuário, sem administrador)
+#   FeatherCode-windows-x64.exe       Windows 10/11 (instalador em Program Files\FeatherWorks, pede administrador)
 #   SHA256SUMS
 #
 # Uso: pacote/gerar.sh [linux|windows ...]   (sem argumentos = todos)
