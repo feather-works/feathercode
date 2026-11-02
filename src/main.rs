@@ -1,3 +1,4 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
 //! FeatherCode: editor de código da suíte FeatherWorks, com o Claude Code no painel lateral.
 mod adaptadores;
 mod agente;
