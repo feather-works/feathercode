@@ -65,6 +65,8 @@ fn main() -> Result<(), pelicano::Error> {
         min_size: Some(Size::new(960.0, 560.0)),
         // A barra de título é desenhada pelo app, como no resto da suíte.
         decorations: false,
+        // O X chega como CloseRequested: o app pergunta antes de perder mudança não salva.
+        close_on_request: false,
         app_id: Some("feathercode".into()),
         ..Default::default()
     });
@@ -76,12 +78,227 @@ struct Aba {
     conteudo: Content,
     /// `Content::version` da última vez que o arquivo foi lido ou salvo.
     salvo: u64,
+    /// Marca do texto no disco da última vez que foi lido ou salvo: diz se outro (o agente) mexeu.
+    disco: u64,
+    /// O arquivo mudou no disco enquanto a aba tinha mudança não salva.
+    conflito: bool,
+    /// Markdown mostrado formatado em vez do editor.
+    previa: bool,
 }
 
 impl Aba {
+    fn nova(caminho: PathBuf, texto: &str) -> Self {
+        let conteudo = Content::with_text(texto);
+        Aba {
+            caminho,
+            salvo: conteudo.version(),
+            disco: marca_texto(texto),
+            conteudo,
+            conflito: false,
+            previa: false,
+        }
+    }
+
     fn sujo(&self) -> bool {
         self.conteudo.version() != self.salvo
     }
+
+    fn salvar(&mut self) -> std::io::Result<()> {
+        let texto = self.conteudo.text();
+        std::fs::write(&self.caminho, &texto)?;
+        self.salvo = self.conteudo.version();
+        self.disco = marca_texto(&texto);
+        self.conflito = false;
+        Ok(())
+    }
+
+    /// Troca o texto pelo que está no disco e esquece a mudança local.
+    fn recarregar(&mut self, texto: &str) {
+        let previa = self.previa;
+        *self = Aba::nova(std::mem::take(&mut self.caminho), texto);
+        self.previa = previa;
+    }
+
+    fn markdown(&self) -> bool {
+        matches!(
+            self.caminho.extension().and_then(|e| e.to_str()),
+            Some("md" | "markdown")
+        )
+    }
+}
+
+/// Marca curta de um texto, para comparar com o disco sem guardar uma cópia.
+fn marca_texto(t: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    t.trim_end().hash(&mut h);
+    h.finish()
+}
+
+/// Quantas vezes `termo` aparece, para a barra de localizar.
+fn contar(texto: &str, termo: &str, maiusculas: bool) -> usize {
+    if termo.is_empty() {
+        0
+    } else if maiusculas {
+        texto.matches(termo).count()
+    } else {
+        texto.to_lowercase().matches(&termo.to_lowercase()).count()
+    }
+}
+
+/// Na resposta do agente, `src/x.rs:42` vira link que abre o arquivo na linha.
+/// Só liga caminhos de arquivos que existem na pasta; blocos de código ficam como estão.
+fn ligar_caminhos(texto: &str, raiz: &Path) -> String {
+    let mut saida = String::with_capacity(texto.len());
+    let mut bloco = false;
+    for (n, linha) in texto.split('\n').enumerate() {
+        if n > 0 {
+            saida.push('\n');
+        }
+        if linha.trim_start().starts_with("```") {
+            bloco = !bloco;
+        }
+        if bloco || linha.trim_start().starts_with("```") {
+            saida.push_str(linha);
+            continue;
+        }
+        for (k, palavra) in linha.split(' ').enumerate() {
+            if k > 0 {
+                saida.push(' ');
+            }
+            saida.push_str(&ligar_palavra(palavra, raiz));
+        }
+    }
+    saida
+}
+
+fn ligar_palavra(palavra: &str, raiz: &Path) -> String {
+    const VOLTA: &[char] = &['(', ')', '[', ']', '{', '}', ',', ';', ':', '!', '?', '"', '\'', '*', '.'];
+    if palavra.contains("](") || palavra.contains("://") {
+        return palavra.to_string();
+    }
+    // O ponto só sai do fim: no começo ele é de `./src`.
+    let miolo = palavra
+        .trim_start_matches(|c| c != '.' && VOLTA.contains(&c))
+        .trim_end_matches(VOLTA);
+    let caminho_linha = miolo.trim_matches('`');
+    let (caminho, linha) = match caminho_linha.split_once(':') {
+        Some((c, resto)) => (c, resto.split(':').next()),
+        None => (caminho_linha, None),
+    };
+    let linha_ok = linha.is_none_or(|l| !l.is_empty() && l.bytes().all(|b| b.is_ascii_digit()));
+    let parece = caminho.contains('.') || caminho.contains('/');
+    if miolo.is_empty() || !linha_ok || !parece || !raiz.join(caminho).is_file() {
+        return palavra.to_string();
+    }
+    let ini = palavra.find(miolo).unwrap_or(0);
+    let destino = match linha {
+        Some(l) => format!("{caminho}:{l}"),
+        None => caminho.to_string(),
+    };
+    format!(
+        "{}[{caminho_linha}](arquivo:{destino}){}",
+        &palavra[..ini],
+        &palavra[ini + miolo.len()..]
+    )
+}
+
+/// O texto sem os links de arquivo postos por [`ligar_caminhos`], para copiar.
+fn sem_links(texto: &str) -> String {
+    let mut saida = String::with_capacity(texto.len());
+    let mut resto = texto;
+    while let Some(i) = resto.find("](arquivo:") {
+        let Some(fim) = resto[i..].find(')') else { break };
+        let ini = resto[..i].rfind('[').unwrap_or(i);
+        saida.push_str(&resto[..ini]);
+        saida.push_str(&resto[ini + 1..i]);
+        resto = &resto[i + fim + 1..];
+    }
+    saida.push_str(resto);
+    saida
+}
+
+/// Um traço de 2 px embaixo do filho, da largura dele: a aba ativa. Num `stack`, o traço
+/// enchia a barra toda, e a primeira aba escondia as outras e o botão Rodar.
+struct Sublinhado<'a> {
+    filho: Element<'a, Msg>,
+    cor: Color,
+}
+
+impl pelicano::Widget<Msg> for Sublinhado<'_> {
+    fn size(&self) -> (Length, Length) {
+        self.filho.widget().size()
+    }
+    fn layout(&self, cx: &mut pelicano::LayoutCx, l: pelicano::Limits) -> pelicano::Node {
+        let n = cx.child(0, &self.filho, l);
+        pelicano::Node {
+            rect: n.rect,
+            key: cx.key(),
+            children: vec![n],
+            ..Default::default()
+        }
+    }
+    fn draw(&self, n: &pelicano::Node, cx: &mut pelicano::DrawCx) {
+        self.filho.widget().draw(&n.children[0], cx);
+        let r = n.rect;
+        let traco = pelicano::Rect {
+            y: r.y + r.height - 2.0,
+            height: 2.0,
+            ..r
+        };
+        cx.renderer
+            .fill_quad(traco, Some(&self.cor.into()), Border::default(), None);
+    }
+    fn event(
+        &self,
+        n: &pelicano::Node,
+        ev: &Event,
+        cx: &mut pelicano::EventCx<Msg>,
+    ) -> pelicano::Captured {
+        self.filho.widget().event(&n.children[0], ev, cx)
+    }
+    fn opaque_at(&self, n: &pelicano::Node, p: Point) -> bool {
+        self.filho.widget().opaque_at(&n.children[0], p)
+    }
+}
+
+/// Pergunta que espera resposta num diálogo.
+#[derive(Debug, Clone, PartialEq)]
+enum Confirmar {
+    /// Aba com mudança não salva.
+    FecharAba(usize),
+    /// Fechar a janela com abas não salvas.
+    Sair,
+    Excluir(PathBuf),
+}
+
+/// Diálogo que pede um nome (explorador).
+#[derive(Debug, Clone, PartialEq)]
+enum PedirNome {
+    NovoArquivo(PathBuf),
+    NovaPasta(PathBuf),
+    Renomear(PathBuf),
+}
+
+/// Onde o menu do botão direito foi aberto.
+#[derive(Debug, Clone, PartialEq)]
+enum Alvo {
+    Editor,
+    /// Item da árvore: caminho e se é pasta.
+    Arvore(PathBuf, bool),
+    Aba(usize),
+}
+
+/// Barra no topo do editor: localizar (e substituir) ou ir para a linha.
+#[derive(Debug, Clone, Default)]
+struct Barra {
+    linha: bool,
+    substituir: bool,
+    termo: String,
+    novo: String,
+    maiusculas: bool,
+    /// Não achou nada na última busca.
+    nada: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -205,8 +422,37 @@ enum Msg {
     Redimensionar(Option<Divisa>),
     /// O mouse andou durante o arraste (posição na janela).
     Mover(Point),
-    /// Abre (`Some`, onde clicou) ou fecha o menu do botão direito do editor.
-    MenuContexto(Option<Point>),
+    /// Abre (`Some`, onde clicou e em quê) ou fecha o menu do botão direito.
+    MenuContexto(Option<(Point, Alvo)>),
+    /// Resposta do diálogo de confirmação: `Some(true)` salva, `Some(false)` descarta, `None` cancela.
+    Confirmado(Option<bool>),
+    PedirNome(PedirNome),
+    Nome(String),
+    NomeOk,
+    FecharDialogo,
+    CopiarCaminho(PathBuf, bool),
+    AbrirTerminalEm(PathBuf),
+    Excluir(PathBuf),
+    /// Fecha as abas sem mudança da lista; as com mudança ficam.
+    FecharAbas(Vec<usize>),
+    /// Abre a barra do editor: (ir para linha, com substituir).
+    AbrirBarra(bool, bool),
+    TermoBarra(String),
+    NovoBarra(String),
+    Maiusculas,
+    Proxima,
+    TrocarUma,
+    TrocarTodas,
+    FecharBarra,
+    /// Aba em conflito com o disco: ver a diferença, ficar com a minha, usar a do disco.
+    VerConflito,
+    ManterMinha,
+    UsarDisco,
+    Previa,
+    AbrirNoNavegador,
+    CommitEPush,
+    AlternarSalvarSozinho,
+    SalvarSozinho,
     Recortar,
     CopiarSelecao,
     Colar,
@@ -322,8 +568,14 @@ struct Code {
     largura_agente: f32,
     altura_terminal: f32,
     arrastando: Option<Divisa>,
-    /// Menu do botão direito do editor aberto nesse ponto.
-    contexto: Option<Point>,
+    /// Menu do botão direito aberto nesse ponto.
+    contexto: Option<(Point, Alvo)>,
+    confirmar: Option<Confirmar>,
+    /// Diálogo de nome aberto e o texto digitado.
+    pedir_nome: Option<(PedirNome, String)>,
+    barra: Option<Barra>,
+    /// Faz o push quando o commit em andamento terminar.
+    push_depois: bool,
 }
 
 impl pelicano::App for Code {
@@ -348,6 +600,7 @@ impl pelicano::App for Code {
     fn on_event(&self, ev: &Event) -> Option<Msg> {
         match ev {
             Event::Resized(s) => Some(Msg::Tamanho(*s)),
+            Event::CloseRequested => Some(Msg::Fechar),
             // Arquivo solto na janela vira anexo do chat (só imagens são aceitas).
             Event::FileDropped(p) => Some(Msg::Anexadas(vec![p.clone()])),
             _ => None,
@@ -374,6 +627,9 @@ impl pelicano::App for Code {
                 "," if ctrl => Some(Msg::Configuracoes(Some(0))),
                 "s" | "S" if ctrl && shift => Some(Msg::SalvarTudo),
                 "s" if ctrl => Some(Msg::Salvar),
+                "f" if ctrl => Some(Msg::AbrirBarra(false, false)),
+                "h" if ctrl => Some(Msg::AbrirBarra(false, true)),
+                "g" if ctrl => Some(Msg::AbrirBarra(true, false)),
                 "o" | "O" if ctrl && shift => Some(Msg::EscolherArquivo),
                 "n" if ctrl => Some(Msg::NovoArquivo),
                 "e" | "E" if ctrl && shift => Some(Msg::Lado(Lado::Explorador)),
@@ -460,6 +716,10 @@ impl Code {
             altura_terminal: ALTURA_TERMINAL,
             arrastando: None,
             contexto: None,
+            confirmar: None,
+            pedir_nome: None,
+            barra: None,
+            push_depois: false,
         };
         let mut code = code;
         if !code.inicio {
@@ -488,6 +748,19 @@ impl Code {
             .and_then(|v| v.parse().ok())
         {
             code.configuracoes = Some(i);
+        }
+        // FEATHERCODE_CAPTURAR_BARRA=termo abre localizar e substituir com o termo.
+        if let Ok(termo) = std::env::var("FEATHERCODE_CAPTURAR_BARRA") {
+            let _ = code.update(Msg::AbrirBarra(false, true));
+            let _ = code.update(Msg::TermoBarra(termo));
+        }
+        // FEATHERCODE_CAPTURAR_PREVIA=1 mostra o Markdown aberto formatado.
+        if std::env::var_os("FEATHERCODE_CAPTURAR_PREVIA").is_some() {
+            let _ = code.update(Msg::Previa);
+        }
+        // FEATHERCODE_CAPTURAR_DIALOGO=1 mostra a pergunta de fechar a aba aberta.
+        if std::env::var_os("FEATHERCODE_CAPTURAR_DIALOGO").is_some() && !code.abas.is_empty() {
+            code.confirmar = Some(Confirmar::FecharAba(0));
         }
         if std::env::var_os("FEATHERCODE_CAPTURAR_HISTORICO").is_some() {
             code.chat.historico = Some(agente::sessoes(&code.arvore.raiz));
@@ -544,6 +817,11 @@ impl Code {
             }
         }
         subs.push(self.terminais.subscription());
+        if self.config.salvar_sozinho && self.abas.iter().any(Aba::sujo) {
+            subs.push(
+                Subscription::every(std::time::Duration::from_secs(2)).map(|_| Msg::SalvarSozinho),
+            );
+        }
         Subscription::batch(subs)
     }
 
@@ -599,17 +877,35 @@ impl Code {
         s
     }
 
-    /// Recarrega do disco as abas sem mudança local que o agente alterou.
+    /// Lê do disco as abas que outro (o agente) alterou: sem mudança local, recarrega;
+    /// com mudança local, marca o conflito e a pessoa escolhe na faixa do editor.
     fn recarregar_abas(&mut self) {
-        for aba in self.abas.iter_mut().filter(|a| !a.sujo()) {
-            // shortcut: aba com mudança não salva fica como está; avisar do conflito quando incomodar.
-            if let Ok(t) = std::fs::read_to_string(&aba.caminho) {
-                if t.trim_end() != aba.conteudo.text().trim_end() {
-                    aba.conteudo = Content::with_text(&t);
-                    aba.salvo = aba.conteudo.version();
-                }
+        for aba in self.abas.iter_mut() {
+            let Ok(t) = std::fs::read_to_string(&aba.caminho) else {
+                continue;
+            };
+            if marca_texto(&t) == aba.disco {
+                continue;
+            }
+            if !aba.sujo() {
+                aba.recarregar(&t);
+            } else if t.trim_end() != aba.conteudo.text().trim_end() {
+                aba.conflito = true;
+            } else {
+                // O disco ficou igual ao que está na aba: não há o que escolher.
+                aba.disco = marca_texto(&t);
             }
         }
+    }
+
+    /// Salva as abas com mudança; devolve os erros. `pular_conflito`: o salvar sozinho não
+    /// passa por cima do que o agente gravou.
+    fn salvar_abas(&mut self, pular_conflito: bool) -> Vec<String> {
+        self.abas
+            .iter_mut()
+            .filter(|a| a.sujo() && !(pular_conflito && a.conflito))
+            .filter_map(|a| a.salvar().err().map(|e| format!("{}: {e}", a.caminho.display())))
+            .collect()
     }
 
     /// Desce o chat até a última mensagem, como o `anchor_bottom` fazia.
@@ -619,6 +915,10 @@ impl Code {
 
     fn sinal(&mut self, s: Sinal) {
         match s {
+            Sinal::Item(Item::Texto(t)) => {
+                let t = ligar_caminhos(&t, &self.arvore.raiz);
+                self.chat.itens.push(Item::Texto(t))
+            }
             Sinal::Item(i) => self.chat.itens.push(i),
             Sinal::Resultado { id, erro } => {
                 for item in self.chat.itens.iter_mut().rev() {
@@ -684,6 +984,78 @@ impl Code {
         Task::none()
     }
 
+    fn fechar_aba(&mut self, i: usize) {
+        self.abas.remove(i);
+        if self.ativa > i {
+            self.ativa -= 1;
+        }
+        self.ativa = self.ativa.min(self.abas.len().saturating_sub(1));
+    }
+
+    /// Exclui de vez (não há lixeira por aqui) e fecha as abas que estavam lá dentro.
+    fn excluir(&mut self, p: &Path) {
+        let r = if p.is_dir() {
+            std::fs::remove_dir_all(p)
+        } else {
+            std::fs::remove_file(p)
+        };
+        match r {
+            Ok(()) => {
+                for i in (0..self.abas.len()).rev() {
+                    if self.abas[i].caminho.starts_with(p) {
+                        self.fechar_aba(i);
+                    }
+                }
+                let _ = self.update(Msg::AtualizarArvore);
+            }
+            Err(e) => self.aviso = format!("Não deu para excluir {}: {e}", self.relativo(p).display()),
+        }
+    }
+
+    /// Cria ou renomeia pelo diálogo de nome; devolve o arquivo novo, para abrir.
+    fn aplicar_nome(&mut self, acao: &PedirNome, nome: &str) -> Result<Option<PathBuf>, String> {
+        let relativo = Path::new(nome);
+        if nome.is_empty()
+            || relativo.is_absolute()
+            || relativo.components().any(|c| !matches!(c, std::path::Component::Normal(_)))
+        {
+            return Err("Nome inválido.".into());
+        }
+        let destino = match acao {
+            PedirNome::NovoArquivo(pasta) | PedirNome::NovaPasta(pasta) => pasta.join(relativo),
+            PedirNome::Renomear(p) => p.with_file_name(relativo),
+        };
+        if destino.exists() {
+            return Err(format!("Já existe {}.", self.relativo(&destino).display()));
+        }
+        let erro = |e: std::io::Error| format!("Não deu para criar {nome}: {e}");
+        match acao {
+            PedirNome::NovoArquivo(_) => {
+                if let Some(pai) = destino.parent() {
+                    std::fs::create_dir_all(pai).map_err(erro)?;
+                }
+                std::fs::write(&destino, "").map_err(erro)?;
+                self.arvore.mostrar(&destino);
+                Ok(Some(destino))
+            }
+            PedirNome::NovaPasta(_) => {
+                std::fs::create_dir_all(&destino).map_err(erro)?;
+                self.arvore.mostrar(&destino);
+                Ok(None)
+            }
+            PedirNome::Renomear(velho) => {
+                std::fs::rename(velho, &destino)
+                    .map_err(|e| format!("Não deu para renomear: {e}"))?;
+                for aba in &mut self.abas {
+                    if let Ok(resto) = aba.caminho.strip_prefix(velho) {
+                        aba.caminho = destino.join(resto);
+                    }
+                }
+                Ok(None)
+            }
+        }
+    }
+
     fn update(&mut self, msg: Msg) -> Task<Msg> {
         // Escolher qualquer coisa fecha o menu; o que chega sozinho (agente, git, busca) não.
         if !matches!(
@@ -707,6 +1079,185 @@ impl Code {
             Msg::Menu(m) => self.menu = m,
             Msg::Redimensionar(d) => self.arrastando = d,
             Msg::MenuContexto(p) => self.contexto = p,
+            Msg::Confirmado(resposta) => {
+                let Some(pergunta) = self.confirmar.take() else {
+                    return Task::none();
+                };
+                let Some(salvar) = resposta else {
+                    return Task::none();
+                };
+                match pergunta {
+                    Confirmar::FecharAba(i) if i < self.abas.len() => {
+                        if salvar {
+                            if let Err(e) = self.abas[i].salvar() {
+                                self.aviso = format!("Não deu para salvar: {e}");
+                                return Task::none();
+                            }
+                        }
+                        self.fechar_aba(i);
+                    }
+                    Confirmar::FecharAba(_) => {}
+                    Confirmar::Sair => {
+                        if salvar {
+                            let erros = self.salvar_abas(false);
+                            if !erros.is_empty() {
+                                self.aviso = format!("Não deu para salvar: {}", erros.join("; "));
+                                return Task::none();
+                            }
+                        }
+                        return Task::window(WindowCmd::Close);
+                    }
+                    Confirmar::Excluir(p) => self.excluir(&p),
+                }
+            }
+            Msg::Excluir(p) => self.confirmar = Some(Confirmar::Excluir(p)),
+            Msg::PedirNome(acao) => {
+                let texto = match &acao {
+                    PedirNome::Renomear(p) => p
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    _ => String::new(),
+                };
+                self.pedir_nome = Some((acao, texto));
+                return Task::focus("nome");
+            }
+            Msg::Nome(t) => {
+                if let Some((_, texto)) = &mut self.pedir_nome {
+                    *texto = t;
+                }
+            }
+            Msg::NomeOk => {
+                let Some((acao, nome)) = self.pedir_nome.clone() else {
+                    return Task::none();
+                };
+                match self.aplicar_nome(&acao, nome.trim()) {
+                    Ok(abrir) => {
+                        self.pedir_nome = None;
+                        let _ = self.update(Msg::AtualizarArvore);
+                        if let Some(p) = abrir {
+                            return self.update(Msg::AbrirArquivo(p));
+                        }
+                    }
+                    Err(e) => self.aviso = e,
+                }
+            }
+            Msg::FecharDialogo => {
+                self.confirmar = None;
+                self.pedir_nome = None;
+            }
+            Msg::CopiarCaminho(p, relativo) => {
+                let p = if relativo { self.relativo(&p) } else { &p };
+                return Task::write_clipboard(p.display().to_string());
+            }
+            Msg::AbrirTerminalEm(pasta) => {
+                self.terminal_aberto = true;
+                match self.terminais.novo(&pasta, None) {
+                    Ok(_) => return self.terminais.focar(),
+                    Err(e) => self.aviso = e,
+                }
+            }
+            Msg::AbrirBarra(linha, substituir) => {
+                let Some(aba) = self.aba() else {
+                    return Task::none();
+                };
+                let selecao = aba
+                    .conteudo
+                    .selection()
+                    .filter(|s| !s.is_empty() && !s.contains('\n'));
+                let mut b = self.barra.take().unwrap_or_default();
+                if linha != b.linha {
+                    b.termo.clear();
+                }
+                if let (false, Some(sel)) = (linha, selecao) {
+                    b.termo = sel;
+                }
+                b.linha = linha;
+                b.substituir = substituir && !linha;
+                b.nada = false;
+                self.barra = Some(b);
+                return Task::focus("barra");
+            }
+            Msg::TermoBarra(t) => {
+                if let Some(b) = &mut self.barra {
+                    b.termo = t;
+                    b.nada = false;
+                }
+            }
+            Msg::NovoBarra(t) => {
+                if let Some(b) = &mut self.barra {
+                    b.novo = t;
+                }
+            }
+            Msg::Maiusculas => {
+                if let Some(b) = &mut self.barra {
+                    b.maiusculas = !b.maiusculas;
+                }
+            }
+            Msg::Proxima | Msg::TrocarUma | Msg::TrocarTodas => {
+                let (Some(b), Some(aba)) = (self.barra.as_mut(), self.abas.get(self.ativa)) else {
+                    return Task::none();
+                };
+                if b.linha {
+                    match b.termo.trim().parse::<usize>() {
+                        Ok(n) if n > 0 => {
+                            aba.conteudo.go_to_line(n);
+                            self.barra = None;
+                            return Task::focus("editor");
+                        }
+                        _ => b.nada = true,
+                    }
+                    return Task::none();
+                }
+                let c = &aba.conteudo;
+                b.nada = match msg {
+                    Msg::TrocarUma => !c.replace_next(&b.termo, &b.novo, b.maiusculas),
+                    Msg::TrocarTodas => c.replace_all(&b.termo, &b.novo, b.maiusculas) == 0,
+                    _ => !c.find_next(&b.termo, b.maiusculas),
+                };
+            }
+            Msg::FecharBarra => {
+                self.barra = None;
+                return Task::focus("editor");
+            }
+            Msg::VerConflito => {
+                if let Some(aba) = self.aba() {
+                    return Task::perform(
+                        paineis::diff_textos(aba.caminho.clone(), aba.conteudo.text()),
+                        Msg::Diff,
+                    );
+                }
+            }
+            Msg::ManterMinha | Msg::UsarDisco => {
+                let Some(aba) = self.abas.get_mut(self.ativa) else {
+                    return Task::none();
+                };
+                match std::fs::read_to_string(&aba.caminho) {
+                    Ok(t) if matches!(msg, Msg::UsarDisco) => aba.recarregar(&t),
+                    // A do disco fica para trás: o próximo Salvar grava a minha por cima.
+                    Ok(t) => {
+                        aba.disco = marca_texto(&t);
+                        aba.conflito = false;
+                    }
+                    Err(e) => self.aviso = format!("Não deu para ler o arquivo: {e}"),
+                }
+                self.diff = None;
+            }
+            Msg::Previa => {
+                if let Some(aba) = self.abas.get_mut(self.ativa) {
+                    aba.previa = !aba.previa && aba.markdown();
+                }
+            }
+            Msg::AbrirNoNavegador => {
+                if let Some(aba) = self.aba() {
+                    let caminho = aba.caminho.display().to_string();
+                    return self.update(Msg::Link(caminho));
+                }
+            }
+            Msg::CommitEPush => {
+                self.push_depois = true;
+                return self.update(Msg::Commit);
+            }
             Msg::CopiarSelecao | Msg::Recortar => {
                 let Some(aba) = self.abas.get(self.ativa) else {
                     return Task::none();
@@ -789,6 +1340,11 @@ impl Code {
                 if self.menu.is_some() || self.contexto.is_some() {
                     self.menu = None;
                     self.contexto = None;
+                } else if self.confirmar.is_some() || self.pedir_nome.is_some() {
+                    self.confirmar = None;
+                    self.pedir_nome = None;
+                } else if self.barra.is_some() {
+                    return self.update(Msg::FecharBarra);
                 } else {
                     self.configuracoes = None;
                 }
@@ -942,6 +1498,7 @@ impl Code {
             Msg::Commit => {
                 let msg = self.mensagem_commit.trim().to_string();
                 if msg.is_empty() {
+                    self.push_depois = false;
                     self.aviso = "Escreva a mensagem do commit.".into();
                 } else {
                     return Task::perform(
@@ -954,9 +1511,16 @@ impl Code {
                 self.geracao_titulo += 1;
                 self.titulo_pendente = None;
                 self.mensagem_commit.clear();
-                return self.update(Msg::GitAtualizar);
+                let atualizar = self.update(Msg::GitAtualizar);
+                if std::mem::take(&mut self.push_depois) {
+                    return Task::batch([atualizar, self.update(Msg::GitRemoto("push"))]);
+                }
+                return atualizar;
             }
-            Msg::Commitado(Err(e)) => self.aviso = e,
+            Msg::Commitado(Err(e)) => {
+                self.push_depois = false;
+                self.aviso = e;
+            }
             Msg::AbrirPasta => {
                 return Task::perform(
                     rfd::AsyncFileDialog::new()
@@ -1063,12 +1627,7 @@ impl Code {
                     match std::fs::read_to_string(&p) {
                         Ok(t) => {
                             self.config.usar_arquivo(p.clone());
-                            let conteudo = Content::with_text(&t);
-                            self.abas.push(Aba {
-                                caminho: p,
-                                salvo: conteudo.version(),
-                                conteudo,
-                            });
+                            self.abas.push(Aba::nova(p, &t));
                             self.ativa = self.abas.len() - 1;
                             self.aviso.clear();
                         }
@@ -1086,32 +1645,45 @@ impl Code {
                 self.diff = None;
             }
             Msg::FecharAba(i) if i >= self.abas.len() => {}
-            Msg::FecharAba(i) => {
-                // shortcut: fecha sem perguntar mesmo com mudança; pedir confirmação no diálogo da suíte depois.
-                self.abas.remove(i);
-                self.ativa = self.ativa.min(self.abas.len().saturating_sub(1));
-            }
-            Msg::SalvarTudo => {
-                let mut erros = Vec::new();
-                for aba in self.abas.iter_mut().filter(|a| a.sujo()) {
-                    match std::fs::write(&aba.caminho, aba.conteudo.text()) {
-                        Ok(()) => aba.salvo = aba.conteudo.version(),
-                        Err(e) => erros.push(format!("{}: {e}", aba.caminho.display())),
+            Msg::FecharAba(i) if self.abas[i].sujo() => self.confirmar = Some(Confirmar::FecharAba(i)),
+            Msg::FecharAba(i) => self.fechar_aba(i),
+            Msg::FecharAbas(mut lista) => {
+                lista.sort_unstable();
+                lista.retain(|&i| i < self.abas.len());
+                let mut ficaram = 0;
+                for i in lista.into_iter().rev() {
+                    if self.abas[i].sujo() {
+                        ficaram += 1;
+                    } else {
+                        self.fechar_aba(i);
                     }
                 }
+                if ficaram > 0 {
+                    self.aviso = format!("{ficaram} aba(s) com mudança não salva ficaram abertas.");
+                }
+            }
+            Msg::SalvarTudo => {
+                let erros = self.salvar_abas(false);
                 self.aviso = if erros.is_empty() {
                     String::new()
                 } else {
                     format!("Não deu para salvar: {}", erros.join("; "))
                 };
             }
+            Msg::SalvarSozinho => {
+                let erros = self.salvar_abas(true);
+                if !erros.is_empty() {
+                    self.aviso = format!("Não deu para salvar: {}", erros.join("; "));
+                }
+            }
+            Msg::AlternarSalvarSozinho => {
+                self.config.salvar_sozinho = !self.config.salvar_sozinho;
+                self.config.gravar();
+            }
             Msg::Salvar => {
                 if let Some(aba) = self.abas.get_mut(self.ativa) {
-                    match std::fs::write(&aba.caminho, aba.conteudo.text()) {
-                        Ok(()) => {
-                            aba.salvo = aba.conteudo.version();
-                            self.aviso.clear();
-                        }
+                    match aba.salvar() {
+                        Ok(()) => self.aviso.clear(),
                         Err(e) => self.aviso = format!("Não deu para salvar: {e}"),
                     }
                 }
@@ -1355,6 +1927,16 @@ impl Code {
                     }
                 }
             }
+            Msg::Link(url) if url.starts_with("arquivo:") => {
+                let resto = &url["arquivo:".len()..];
+                let (caminho, linha) = match resto.rsplit_once(':') {
+                    Some((c, l)) if l.bytes().all(|b| b.is_ascii_digit()) => {
+                        (c, l.parse::<usize>().unwrap_or(1))
+                    }
+                    _ => (resto, 1),
+                };
+                return self.update(Msg::IrPara(self.arvore.raiz.join(caminho), linha.saturating_sub(1)));
+            }
             Msg::Link(url) => {
                 if let Err(e) = sistema::abrir_link(&url) {
                     self.aviso = format!("Não deu para abrir o link: {e}");
@@ -1387,6 +1969,9 @@ impl Code {
             Msg::Minimizar => return Task::window(WindowCmd::Minimize),
             Msg::Puxar(d) => return Task::window(WindowCmd::DragResize(d)),
             Msg::Maximizar => return Task::window(WindowCmd::ToggleMaximize),
+            Msg::Fechar if self.abas.iter().any(Aba::sujo) => {
+                self.confirmar = Some(Confirmar::Sair)
+            }
             Msg::Fechar => return Task::window(WindowCmd::Close),
         }
         Task::none()
@@ -1462,8 +2047,90 @@ impl Code {
                 .into(),
             None => janela,
         };
+        let janela = self.com_dialogo(janela);
         // Com as beiradas de redimensionar: sem a moldura do sistema, só mudava de tamanho maximizando.
         cromo::moldura_redimensionavel(janela, Msg::Puxar)
+    }
+
+    /// Diálogo da suíte por cima da janela: confirmar (fechar, sair, excluir) ou pedir um nome.
+    fn com_dialogo<'a>(&'a self, base: Element<'a, Msg>) -> Element<'a, Msg> {
+        use feather_ui::dialogo::Dialogo;
+        let nome = |p: &Path| self.relativo(p).display().to_string();
+        let ajustar = |d: Dialogo<'a, Msg>| {
+            d.ao_fechar(Msg::FecharDialogo)
+                .topo(cromo::BARRA_ALTURA + 60.0)
+                .altura_janela(self.tamanho.height)
+                .largura_janela(self.tamanho.width)
+        };
+        if let Some(c) = &self.confirmar {
+            let (titulo, frase, salvar, descartar) = match c {
+                Confirmar::FecharAba(i) => (
+                    "Salvar as mudanças?",
+                    format!(
+                        "{} tem mudanças que não foram salvas.",
+                        self.abas.get(*i).map(|a| nome(&a.caminho)).unwrap_or_default()
+                    ),
+                    Some("Salvar"),
+                    "Não salvar",
+                ),
+                Confirmar::Sair => {
+                    let sujas: Vec<String> =
+                        self.abas.iter().filter(|a| a.sujo()).map(|a| nome(&a.caminho)).collect();
+                    (
+                        "Sair sem salvar?",
+                        format!("Estas abas têm mudanças não salvas: {}.", sujas.join(", ")),
+                        Some("Salvar e sair"),
+                        "Sair sem salvar",
+                    )
+                }
+                Confirmar::Excluir(p) => (
+                    "Excluir?",
+                    format!(
+                        "{} vai ser apagado de vez. Não vai para a lixeira.",
+                        nome(p)
+                    ),
+                    None,
+                    "Excluir",
+                ),
+            };
+            let d = ajustar(Dialogo::new(titulo, text(frase).size(13)).icone("alert-triangle"))
+                .secundario("Cancelar", Some(Msg::Confirmado(None)));
+            let d = match salvar {
+                Some(s) => d
+                    .secundario(descartar, Some(Msg::Confirmado(Some(false))))
+                    .primario(s, Some(Msg::Confirmado(Some(true)))),
+                None => d.primario(descartar, Some(Msg::Confirmado(Some(true)))),
+            };
+            return d.sobre(base);
+        }
+        if let Some((acao, texto)) = &self.pedir_nome {
+            let (titulo, onde, botao) = match acao {
+                PedirNome::NovoArquivo(p) => ("Novo arquivo", p, "Criar"),
+                PedirNome::NovaPasta(p) => ("Nova pasta", p, "Criar"),
+                PedirNome::Renomear(p) => ("Renomear", p, "Renomear"),
+            };
+            let onde = match acao {
+                PedirNome::Renomear(_) => format!("Novo nome para {}", nome(onde)),
+                _ if *onde == self.arvore.raiz => "Na pasta do projeto".into(),
+                _ => format!("Em {}", nome(onde)),
+            };
+            let corpo = column![
+                text(onde).size(12).color(COR_TEXTO_MUTED()),
+                text_input("nome", texto.as_str())
+                    .id("nome")
+                    .on_input(Msg::Nome)
+                    .on_submit(Msg::NomeOk)
+                    .size(13)
+                    .padding([6, 8])
+                    .style(campo(COR_PAINEL())),
+            ]
+            .spacing(8);
+            return ajustar(Dialogo::new(titulo, corpo))
+                .secundario("Cancelar", Some(Msg::FecharDialogo))
+                .primario(botao, Some(Msg::NomeOk))
+                .sobre(base);
+        }
+        base
     }
 
     fn area_de_trabalho<'a>(&'a self, barra: Element<'a, Msg>) -> Element<'a, Msg> {
@@ -1471,6 +2138,8 @@ impl Code {
         let editor = cartao(
             column![
                 self.abas_view(),
+                self.conflito_view(),
+                self.barra_view(),
                 match &self.diff {
                     Some(d) => self.diff_view(d),
                     None => self.editor_view(),
@@ -1540,26 +2209,32 @@ impl Code {
             } else {
                 Space::new(12.0, 0.0).into()
             };
+            let icone = paineis::icone_arquivo(&l.caminho, l.pasta.then_some(l.aberta));
+            let alvo = Alvo::Arvore(l.caminho.clone(), l.pasta);
             let ativo = aberto == Some(l.caminho.as_path());
             let msg = if l.pasta {
                 Msg::Alternar(l.caminho)
             } else {
                 Msg::AbrirArquivo(l.caminho)
             };
-            button(
-                row![
-                    Space::new(l.nivel as f32 * 14.0, 0.0),
-                    seta,
-                    text(nome).size(13).no_wrap()
-                ]
-                .spacing(4)
+            mouse_area(
+                button(
+                    row![
+                        Space::new(l.nivel as f32 * 14.0, 0.0),
+                        seta,
+                        icone,
+                        text(nome).size(13).no_wrap()
+                    ]
+                    .spacing(4)
+                    .width(Length::FILL)
+                    .align(Align::Center),
+                )
+                .on_press(msg)
                 .width(Length::FILL)
-                .align(Align::Center),
+                .padding([3, 12])
+                .style(move |_, s| item_lista(ativo, s, 0.0)),
             )
-            .on_press(msg)
-            .width(Length::FILL)
-            .padding([3, 12])
-            .style(move |_, s| item_lista(ativo, s, 0.0))
+            .on_right_press_at(move |p| Msg::MenuContexto(Some((p, alvo.clone()))))
             .into()
         });
         let titulo = text(
@@ -1630,6 +2305,24 @@ impl Code {
                     row![
                         container(titulo).width(Length::FILL),
                         tooltip(
+                            botao_icone(
+                                "file-plus",
+                                Msg::PedirNome(PedirNome::NovoArquivo(self.arvore.raiz.clone()))
+                            ),
+                            "Novo arquivo",
+                            TooltipPosition::Bottom
+                        )
+                        .style(tema::estilo_dica),
+                        tooltip(
+                            botao_icone(
+                                "folder",
+                                Msg::PedirNome(PedirNome::NovaPasta(self.arvore.raiz.clone()))
+                            ),
+                            "Nova pasta",
+                            TooltipPosition::Bottom
+                        )
+                        .style(tema::estilo_dica),
+                        tooltip(
                             botao_icone("refresh", Msg::AtualizarArvore),
                             "Atualizar arquivos",
                             TooltipPosition::Bottom
@@ -1689,20 +2382,16 @@ impl Code {
             .height(Length::FILL)
             .style(move |_, s| aba_estilo(ativa, s));
             // O traço embaixo marca a aba ativa.
-            let traco = container(Space::new(0.0, 2.0))
-                .width(Length::FILL)
-                .style(move |_| {
-                    fundo(if ativa {
-                        COR_AZUL_ACENTO()
-                    } else {
-                        Color::TRANSPARENT
-                    })
-                });
-            stack![
-                aba,
-                column![Space::new(0.0, Length::FILL), traco].height(Length::FILL)
-            ]
-            .height(Length::FILL)
+            let aba: Element<Msg> = if ativa {
+                Element::new(Sublinhado {
+                    filho: aba.into(),
+                    cor: COR_AZUL_ACENTO(),
+                })
+            } else {
+                aba.into()
+            };
+            mouse_area(aba)
+            .on_right_press_at(move |p| Msg::MenuContexto(Some((p, Alvo::Aba(i)))))
             .into()
         });
         let arquivo = self.aba().map(|a| a.caminho.as_path());
@@ -1712,10 +2401,31 @@ impl Code {
             } else {
                 Space::new(0.0, 0.0).into()
             };
+        let extra: Element<Msg> = match self.aba() {
+            Some(a) if a.markdown() => botao_texto(
+                row![
+                    icone_traco(if a.previa { "code" } else { "eye" }, 14.0),
+                    text(if a.previa { "Editar" } else { "Prévia" }).size(12)
+                ]
+                .spacing(6)
+                .align(Align::Center),
+                Msg::Previa,
+            ),
+            Some(a)
+                if matches!(
+                    a.caminho.extension().and_then(|e| e.to_str()),
+                    Some("html" | "htm")
+                ) =>
+            {
+                botao_texto(text("Abrir no navegador").size(12), Msg::AbrirNoNavegador)
+            }
+            _ => Space::new(0.0, 0.0).into(),
+        };
         container(
             row![
                 row(abas).height(Length::FILL),
                 horizontal_space(),
+                extra,
                 container(rodar).padding([0, 10])
             ]
             .height(Length::FILL)
@@ -1746,23 +2456,45 @@ impl Code {
                 .style(|_| fundo(COR_PAINEL()))
                 .into();
         };
+        if aba.previa {
+            return container(
+                rolagem(
+                    container(markdown(&aba.conteudo.text(), 14.0, Msg::Link))
+                        .padding([16, 24])
+                        .width(Length::FILL),
+                )
+                .height(Length::FILL),
+            )
+            .width(Length::FILL)
+            .height(Length::FILL)
+            .style(|_| fundo(COR_PAINEL()))
+            .into();
+        }
         let extensao = aba
             .caminho
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("txt");
+        let barra_aberta = self.barra.is_some();
         // O editor do pelicano rola, numera as linhas e desfaz sozinho; o app só cuida dos atalhos.
         let mut editor = text_editor(&aba.conteudo)
             .id("editor")
             // O chat também é um editor: sem clique, nenhum dos dois pega a digitação.
             .idle_focus(false)
-            .on_key(|k, m| {
+            .on_key(move |k, m| {
                 let ctrl = m.control_key() || m.super_key();
                 match k {
                     Key::Named(NamedKey::Tab) if !ctrl => Some(Msg::Recuar(!m.shift_key())),
                     Key::Character(c) if ctrl && matches!(c.as_str(), ";" | "/") => {
                         Some(Msg::Comentar)
                     }
+                    Key::Character(c) if ctrl && !m.shift_key() => match c.as_str() {
+                        "f" => Some(Msg::AbrirBarra(false, false)),
+                        "h" => Some(Msg::AbrirBarra(false, true)),
+                        "g" => Some(Msg::AbrirBarra(true, false)),
+                        _ => None,
+                    },
+                    Key::Named(NamedKey::Escape) if barra_aberta => Some(Msg::FecharBarra),
                     _ => None,
                 }
             })
@@ -1792,7 +2524,132 @@ impl Code {
                 .height(Length::FILL)
                 .style(|_| fundo(COR_PAINEL())),
         )
-        .on_right_press_at(|p| Msg::MenuContexto(Some(p)))
+        .on_right_press_at(|p| Msg::MenuContexto(Some((p, Alvo::Editor))))
+        .into()
+    }
+
+    /// Faixa acima do editor quando o agente mudou no disco um arquivo com mudança não salva.
+    fn conflito_view(&self) -> Element<'_, Msg> {
+        if !self.aba().is_some_and(|a| a.conflito) {
+            return Space::new(0.0, 0.0).into();
+        }
+        container(
+            row![
+                icone_traco("alert-triangle", 14.0),
+                text("Este arquivo mudou no disco (o agente gravou) e a aba tem mudança não salva.")
+                    .size(12)
+                    .width(Length::FILL),
+                botao_texto(text("Ver diferença").size(12), Msg::VerConflito),
+                botao_texto(text("Ficar com a minha").size(12), Msg::ManterMinha),
+                botao_texto(text("Usar a do disco").size(12), Msg::UsarDisco),
+            ]
+            .spacing(8)
+            .align(Align::Center),
+        )
+        .padding([4, 12])
+        .width(Length::FILL)
+        .style(|_| fundo(AMARELO.alpha(0.18)))
+        .into()
+    }
+
+    /// Localizar/substituir (Ctrl+F, Ctrl+H) ou ir para a linha (Ctrl+G), acima do editor.
+    fn barra_view(&self) -> Element<'_, Msg> {
+        let (Some(b), Some(aba)) = (&self.barra, self.aba()) else {
+            return Space::new(0.0, 0.0).into();
+        };
+        let estilo = campo(if b.nada {
+            mistura_cor(COR_PAINEL(), COR_ERRO(), 0.25)
+        } else {
+            COR_PAINEL()
+        });
+        let fechar = tooltip(
+            botao_icone("x", Msg::FecharBarra),
+            "Fechar (Esc)",
+            TooltipPosition::Bottom,
+        )
+        .style(tema::estilo_dica);
+        let linha: Element<Msg> = if b.linha {
+            row![
+                text(format!("Ir para a linha (1 a {}):", aba.conteudo.line_count())).size(12),
+                text_input("número", b.termo.as_str())
+                    .id("barra")
+                    .on_input(Msg::TermoBarra)
+                    .on_submit(Msg::Proxima)
+                    .size(12)
+                    .padding([4, 8])
+                    .width(120.0)
+                    .style(estilo),
+                horizontal_space(),
+                fechar,
+            ]
+            .spacing(8)
+            .align(Align::Center)
+            .into()
+        } else {
+            let achados = contar(&aba.conteudo.text(), &b.termo, b.maiusculas);
+            let mut col = column![row![
+                text_input("Localizar", b.termo.as_str())
+                    .id("barra")
+                    .on_input(Msg::TermoBarra)
+                    .on_submit(Msg::Proxima)
+                    .size(12)
+                    .padding([4, 8])
+                    .width(260.0)
+                    .style(estilo),
+                tooltip(
+                    botao_texto(
+                        text("Aa").size(12).font(NEGRITO).color(if b.maiusculas {
+                            COR_AZUL_ACENTO()
+                        } else {
+                            COR_TEXTO_MUTED()
+                        }),
+                        Msg::Maiusculas
+                    ),
+                    "Diferenciar maiúsculas",
+                    TooltipPosition::Bottom
+                )
+                .style(tema::estilo_dica),
+                text(match achados {
+                    0 if b.termo.is_empty() => String::new(),
+                    0 => "nenhum".into(),
+                    1 => "1 achado".into(),
+                    n => format!("{n} achados"),
+                })
+                .size(12)
+                .color(COR_TEXTO_MUTED()),
+                botao_texto(text("Próximo (Enter)").size(12), Msg::Proxima),
+                horizontal_space(),
+                fechar,
+            ]
+            .spacing(8)
+            .align(Align::Center)]
+            .spacing(6);
+            if b.substituir {
+                col = col.push(
+                    row![
+                        text_input("Substituir por", b.novo.as_str())
+                            .on_input(Msg::NovoBarra)
+                            .on_submit(Msg::TrocarUma)
+                            .size(12)
+                            .padding([4, 8])
+                            .width(260.0)
+                            .style(campo(COR_PAINEL())),
+                        botao_texto(text("Substituir").size(12), Msg::TrocarUma),
+                        botao_texto(text("Substituir todos").size(12), Msg::TrocarTodas),
+                    ]
+                    .spacing(8)
+                    .align(Align::Center),
+                );
+            }
+            col.into()
+        };
+        column![
+            container(linha)
+                .padding([6, 12])
+                .width(Length::FILL)
+                .style(|_| fundo(COR_CROMO_2())),
+            linha_horizontal()
+        ]
         .into()
     }
 
@@ -1810,6 +2667,8 @@ impl Code {
                     .size(13)
                     .font(NEGRITO),
                 text(match &d.commit {
+                    // O conflito com o disco manda uma frase pronta em vez de um hash.
+                    Some(h) if h.contains(' ') => h.clone(),
                     Some(h) => format!("no commit {h}"),
                     None => "alterações desde o último commit".into(),
                 })
@@ -2520,7 +3379,7 @@ fn item_view(i: usize, item: &Item) -> Element<'_, Msg> {
         .into(),
         Item::Texto(fonte) => {
             let copiar = tooltip(
-                botao_icone("copy", Msg::Copiar(fonte.clone())),
+                botao_icone("copy", Msg::Copiar(sem_links(fonte))),
                 "Copiar resposta",
                 TooltipPosition::Top,
             )
@@ -3072,12 +3931,7 @@ mod testes {
     fn trecho_vai_no_pedido_com_o_rotulo() {
         use super::*;
         let (mut code, _) = Code::novo(config::Config::ler());
-        let conteudo = Content::with_text("fn a() {}\nfn b() {}\n");
-        code.abas.push(Aba {
-            caminho: code.arvore.raiz.join("x.rs"),
-            salvo: conteudo.version(),
-            conteudo,
-        });
+        code.abas.push(Aba::nova(code.arvore.raiz.join("x.rs"), "fn a() {}\nfn b() {}\n"));
         let _ = code.update(Msg::MandarTrecho);
         assert_eq!(code.chat.trechos[0].0, "x.rs 1");
         let _ = code.update(Msg::Enviar);
@@ -3085,6 +3939,60 @@ mod testes {
         assert!(matches!(code.chat.itens.last(), Some(Item::Eu(t)) if t == "[x.rs 1]"));
         let linha = &code.chat.fila[0];
         assert!(linha.contains("linhas 1 a 1") && linha.contains("fn a() {}"));
+    }
+
+    #[test]
+    fn aba_suja_pergunta_ao_fechar_e_marca_conflito_com_o_disco() {
+        use super::*;
+        let pasta = std::env::temp_dir().join(format!("feathercode-conflito-t-{}", std::process::id()));
+        std::fs::create_dir_all(&pasta).unwrap();
+        let (a, b) = (pasta.join("a.txt"), pasta.join("b.txt"));
+        std::fs::write(&a, "um").unwrap();
+        std::fs::write(&b, "um").unwrap();
+        let (mut code, _) = Code::novo(config::Config::ler());
+        // Sem AbrirArquivo: ele gravaria o arquivo nos recentes da config de verdade.
+        code.abas.push(Aba::nova(a.clone(), "um"));
+        code.abas.push(Aba::nova(b.clone(), "um"));
+        code.abas[0].conteudo.insert("minha ");
+        // O agente grava nos dois: a aba limpa recarrega, a suja fica em conflito.
+        std::fs::write(&a, "do agente").unwrap();
+        std::fs::write(&b, "do agente").unwrap();
+        code.recarregar_abas();
+        assert!(code.abas[0].conflito && code.abas[0].sujo());
+        assert!(!code.abas[1].conflito);
+        assert_eq!(code.abas[1].conteudo.text().trim_end(), "do agente");
+        let _ = code.update(Msg::FecharAba(0));
+        assert_eq!(code.confirmar, Some(Confirmar::FecharAba(0)));
+        assert_eq!(code.abas.len(), 2);
+        let _ = code.update(Msg::Confirmado(Some(false)));
+        assert_eq!(code.abas.len(), 1);
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "do agente");
+        assert!(code.aplicar_nome(&PedirNome::NovoArquivo(pasta.clone()), "../fora.txt").is_err());
+        assert!(code.aplicar_nome(&PedirNome::Renomear(b.clone()), "a.txt").is_err());
+        assert_eq!(
+            code.aplicar_nome(&PedirNome::NovoArquivo(pasta.clone()), "sub/c.rs"),
+            Ok(Some(pasta.join("sub/c.rs")))
+        );
+        std::fs::remove_dir_all(&pasta).unwrap();
+    }
+
+    #[test]
+    fn caminhos_da_resposta_viram_links_e_saem_ao_copiar() {
+        use super::*;
+        let raiz = std::env::temp_dir().join(format!("feathercode-links-{}", std::process::id()));
+        std::fs::create_dir_all(raiz.join("src")).unwrap();
+        std::fs::write(raiz.join("src/a.rs"), "").unwrap();
+        let texto = "Mudei `src/a.rs:42`, veja (src/a.rs).\n```\nsrc/a.rs:1\n```\nnao.rs:3 e src/a.rs:x";
+        let ligado = ligar_caminhos(texto, &raiz);
+        assert_eq!(
+            ligado,
+            "Mudei [src/a.rs:42](arquivo:src/a.rs:42), veja ([src/a.rs](arquivo:src/a.rs)).\n```\nsrc/a.rs:1\n```\nnao.rs:3 e src/a.rs:x"
+        );
+        assert_eq!(
+            sem_links(&ligado),
+            "Mudei src/a.rs:42, veja (src/a.rs).\n```\nsrc/a.rs:1\n```\nnao.rs:3 e src/a.rs:x"
+        );
+        std::fs::remove_dir_all(&raiz).unwrap();
     }
 
     #[test]

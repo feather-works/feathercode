@@ -85,6 +85,12 @@ impl Code {
                             .on_toggle(|_| Msg::AlternarLinhas)
                     ),
                     linha(
+                        "Salvar sozinho",
+                        "Grave as abas com mudança a cada 2 segundos. Arquivo que o agente mudou fica esperando você escolher.",
+                        checkbox("Ativar", self.config.salvar_sozinho)
+                            .on_toggle(|_| Msg::AlternarSalvarSozinho)
+                    ),
+                    linha(
                         "Cores do código",
                         "Escolha o tema de destaque da sintaxe.",
                         cores
@@ -161,6 +167,9 @@ impl Code {
                     ("Mostrar/ocultar terminal", "Ctrl+J"),
                     ("Rodar projeto", "F5"),
                     ("Comentar linha", "Ctrl+/ ou Ctrl+;"),
+                    ("Localizar no arquivo", "Ctrl+F"),
+                    ("Substituir no arquivo", "Ctrl+H"),
+                    ("Ir para a linha", "Ctrl+G"),
                     ("Desfazer", "Ctrl+Z"),
                     ("Refazer", "Ctrl+Y ou Ctrl+Shift+Z"),
                     ("Fechar configurações", "Esc"),

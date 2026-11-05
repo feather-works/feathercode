@@ -15,7 +15,7 @@ cargo clippy
 ```
 
 Screenshot mode, used to check the UI without clicking through it:
-`FEATHERCODE_CAPTURAR=foto.png cargo run -- <pasta>` captures the window to a PNG and closes it. This mode never writes the user config. Optional flags: `FEATHERCODE_CAPTURAR_ARQUIVO=<relative path>` opens a file, `FEATHERCODE_CAPTURAR_EXEMPLO=1` fills in a sample conversation and terminal, and `FEATHERCODE_CAPTURAR_MENU=<n>` leaves top menu `n` open.
+`FEATHERCODE_CAPTURAR=foto.png cargo run -- <pasta>` captures the window to a PNG and closes it. This mode never writes the user config. Optional flags: `FEATHERCODE_CAPTURAR_ARQUIVO=<relative path>` opens a file, `FEATHERCODE_CAPTURAR_EXEMPLO=1` fills in a sample conversation and terminal, `FEATHERCODE_CAPTURAR_MENU=<n>` leaves top menu `n` open, `FEATHERCODE_CAPTURAR_BARRA=<termo>` opens find and replace with that term, `FEATHERCODE_CAPTURAR_DIALOGO=1` shows the close-tab question for the open file, and `FEATHERCODE_CAPTURAR_PREVIA=1` shows the open Markdown file formatted.
 
 ## Architecture
 
@@ -29,7 +29,13 @@ The app is a single `pelicano::App` (`pelicano::run`). `Code` in `src/main.rs` i
 - **`modelos.rs`**: project templates as file lists. `{nome}` becomes the package name and `{modulo}` the snake_case name.
 - **`paineis.rs`**: left rail (Explorer, Search, Git), the search and Git panels, and the top menu.
 - **`arvore.rs`**: file tree. Folders are read lazily when expanded. The ignored folders are a fixed list (`IGNORADAS`), not `.gitignore`.
-- **`config.rs`**: theme, recents and preferences, stored as JSON in the system config folder (`dirs`).
+- **`config.rs`**: theme, recents and preferences (`salvar_sozinho` included), stored as JSON in the system config folder (`dirs`).
+
+Editor safety, all in `main.rs`:
+- `Aba::disco` is a hash of the text on disk at the last read or save. `recarregar_abas` (after each agent tool result and turn) reloads clean tabs that changed on disk, and marks dirty ones `conflito`: a yellow strip above the editor offers "Ver diferença" (`paineis::diff_textos`, `git diff --no-index`), "Ficar com a minha" and "Usar a do disco". Autosave skips tabs in conflict.
+- Closing a dirty tab or the window asks first (`Confirmar`, the suite `feather_ui::dialogo::Dialogo`). The window runs with `close_on_request: false`, so the X arrives as `Event::CloseRequested` → `Msg::Fechar`.
+- The active tab's underline is the `Sublinhado` widget, not a `stack`: in a `stack`, a `Length::FILL` layer takes the whole bar, and the first tab hid the other tabs and the Run button.
+- Agent replies go through `ligar_caminhos` when they arrive: `src/x.rs:42` (file must exist) becomes a link `arquivo:src/x.rs:42` that `Msg::Link` opens at the line. "Copiar resposta" strips them (`sem_links`).
 
 Colors, theme, icons, window chrome and the suite brand come from `feather-ui`, a git dependency pinned by tag in `Cargo.toml`. Reuse its `COR_*` and widgets before you write your own style.
 
@@ -52,16 +58,18 @@ Regra que vale para tudo: tela nova é desenhada no artifact primeiro
       a em linha fica como opção.
 - [x] No Gráfico, clicar num commit abre a lista de arquivos dele; clicar no arquivo mostra a
       diferença daquele commit (`git show <hash> -- arquivo`).
-- [ ] Ctrl+Enter faz o commit; botão Commit com seta: "Commit e Push", "Commit (só o preparado)".
+- [x] Enter no campo da mensagem já faz o commit; botão "+ Push" ao lado faz Commit e Push (05/11).
+- [ ] "Commit (só o preparado)": depende de preparar arquivo por arquivo.
 - [ ] Preparar/despreparar arquivo por arquivo (+ / −), como "Staged Changes".
 
 **Editor (feito em 19/10):** Ctrl+Z/Ctrl+Y (hoje o do próprio `text_editor` do pelicano); linha do
 cursor destacada; trilho no estilo do VS Code; só a pena no topo.
 
 **Explorador**
-- [ ] Ícone por tipo de arquivo (`.py`, `.rs`, `.env`, `.gitignore`, `.md`, `.txt`…).
+- [x] Ícone por tipo de arquivo (05/11): o catálogo da suíte não tem ícone por linguagem, então é
+      um arquivo desenhado com a cor do tipo (`paineis::cor_do_tipo`), e pasta aberta/fechada.
 - [x] Botões no topo: atualizar e recolher tudo (limpa também o filtro).
-- [ ] Botões no topo: novo arquivo e nova pasta.
+- [x] Botões no topo: novo arquivo e nova pasta (05/11), com o diálogo de nome da suíte.
 
 **Agentes**
 - [x] Trocar o agente no rodapé do painel (seletor com os instalados). `adaptadores.rs` traduz o
@@ -79,16 +87,19 @@ cursor destacada; trilho no estilo do VS Code; só a pena no topo.
 
 **Editor**
 - [ ] Dois arquivos lado a lado (dividir o editor).
-- [ ] Prévia de Markdown; prévia de HTML (abrir no navegador).
+- [x] Prévia de Markdown (botão Prévia/Editar na barra de abas); HTML abre no navegador (05/11).
 
 **Menus — triagem dos menus do VS Code (19/10). Regra 3: só entra o que funcionar.**
 - Vale fazer:
   - [x] Arquivo: Abrir arquivo (Ctrl+Shift+O), Salvar tudo (Ctrl+Shift+S).
   - [x] Atalhos: Explorador (Ctrl+Shift+E), Buscar (Ctrl+Shift+F), Git (Ctrl+Shift+G),
     focar/abrir Terminal (Ctrl+`), Comentar linha (Ctrl+/ e Ctrl+; no editor).
+  - [x] (05/11) Localizar (Ctrl+F), Substituir (Ctrl+H), Ir para linha (Ctrl+G): barra acima do
+    editor sobre `Content::find_next/replace_next/replace_all/go_to_line` do pelicano (sem
+    "anterior": o pelicano só busca para a frente). Salvar sozinho (Arquivo e Configurações ▸ Editor).
   - Arquivo: Novo arquivo (Ctrl+N), Abrir recente ▸, Salvar como,
-    Salvamento automático, Reverter arquivo, Fechar pasta, Sair (Ctrl+Q).
-  - Editar: Desfazer/Refazer, Recortar/Copiar/Colar, Localizar (Ctrl+F), Substituir (Ctrl+H),
+    Reverter arquivo, Fechar pasta, Sair (Ctrl+Q).
+  - Editar: Desfazer/Refazer, Recortar/Copiar/Colar,
     Buscar/Substituir nos arquivos, Comentar linha (também Ctrl+/).
   - Seleção: Selecionar tudo, Mover linha (Alt+↑/↓), Copiar linha (Shift+Alt+↑/↓).
   - Exibir: Paleta de comandos (Ctrl+Shift+P), Explorador/Buscar/Git (Ctrl+Shift+E/F/G),
@@ -113,9 +124,11 @@ do topo, só com o que funciona:
 - [x] Editor (21/10): Recortar, Copiar, Colar · Comentar linha · Rodar seleção no terminal ·
       Mandar seleção (ou a linha) ao agente, que vira o chip `arquivo 300:500` no chat.
       Falta Selecionar tudo: o `Content` do pelicano não tem como selecionar pelo app (Ctrl+A funciona).
-- [ ] Explorador: Abrir, Ver alterações (se mudou), Copiar caminho / caminho relativo,
-      Renomear, Excluir (com confirmação); na pasta também Novo arquivo, Nova pasta, Abrir no terminal.
-- [ ] Aba: Fechar, Fechar as outras, Fechar todas, Copiar caminho.
+- [x] Explorador (05/11): Abrir, Ver alterações (se o painel Git já leu as mudanças), Copiar
+      caminho / caminho relativo, Renomear, Excluir (confirma; apaga de vez, não há lixeira); na
+      pasta também Novo arquivo, Nova pasta, Abrir no terminal.
+- [x] Aba (05/11): Fechar, Fechar as outras, Fechar todas (as com mudança não salva ficam abertas),
+      Copiar caminho.
 - [ ] Mudança do Git: Abrir arquivo, Ver alterações, Descartar alterações (com confirmação).
 
 **Lançador e cor**

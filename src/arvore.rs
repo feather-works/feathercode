@@ -58,6 +58,16 @@ impl Arvore {
         }
     }
 
+    /// Abre as pastas até `caminho`, para um item recém-criado aparecer (a releitura vem depois).
+    pub fn mostrar(&mut self, caminho: &Path) {
+        for pai in caminho.ancestors().skip(1) {
+            if !pai.starts_with(&self.raiz) {
+                break;
+            }
+            self.abertas.insert(pai.to_path_buf());
+        }
+    }
+
     /// Relê as pastas abertas: o agente pode ter criado ou apagado arquivos.
     pub fn recarregar(&mut self) {
         self.filhos.clear();

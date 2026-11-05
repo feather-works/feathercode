@@ -234,6 +234,26 @@ pub async fn diff_git(raiz: PathBuf, caminho: PathBuf) -> Result<Diff, String> {
     })
 }
 
+/// Diferença entre o arquivo no disco (antes) e o texto da aba (depois), para o conflito.
+pub async fn diff_textos(caminho: PathBuf, meu: String) -> Result<Diff, String> {
+    let temp = std::env::temp_dir().join(format!("feathercode-conflito-{}", std::process::id()));
+    std::fs::write(&temp, meu).map_err(|e| format!("Não deu para comparar: {e}"))?;
+    // `--no-index` sai com código 1 quando há diferença: o que vale é a saída.
+    let saida = crate::sistema::comando("git")
+        .args(["diff", "--no-index", "--"])
+        .arg(&caminho)
+        .arg(&temp)
+        .output()
+        .await;
+    let _ = std::fs::remove_file(&temp);
+    let saida = saida.map_err(|e| format!("Não deu para rodar o git: {e}"))?;
+    Ok(Diff {
+        caminho,
+        commit: Some("o disco (−) contra a sua aba (+)".into()),
+        linhas: ler_diff(&String::from_utf8_lossy(&saida.stdout)),
+    })
+}
+
 /// O que um commit mudou nesse arquivo (contra o primeiro pai, se for merge).
 pub async fn diff_do_commit(raiz: PathBuf, hash: String, caminho: PathBuf) -> Result<Diff, String> {
     let saida = crate::sistema::comando("git")
@@ -389,6 +409,51 @@ pub const MENUS: [(&str, f32); 4] = [
 /// Largura da pena antes dos menus.
 pub const LARGURA_MARCA: f32 = 30.0;
 
+
+const ICONE_ARQUIVO: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3v4a1 1 0 0 0 1 1h4"/><path d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2z"/></svg>"##;
+
+/// Cor do ícone pelo tipo do arquivo, como os editores fazem: dá para achar o `.rs` de olho.
+fn cor_do_tipo(caminho: &Path) -> Color {
+    let nome = caminho
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let ext = caminho
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let hex = match (nome.as_str(), ext.as_str()) {
+        (n, _) if n.starts_with(".env") => 0xd6a428,
+        (".gitignore" | ".gitattributes" | ".gitmodules", _) => 0xe0603c,
+        ("license" | "licence" | "license.md" | "license.txt", _) => 0xc9a227,
+        (n, _) if n.ends_with(".lock") || n == "package-lock.json" => 0x8a8f98,
+        (_, "rs") => 0xde8a5a,
+        (_, "py" | "pyi") => 0x4b8bbe,
+        (_, "js" | "mjs" | "cjs" | "jsx") => 0xe8c547,
+        (_, "ts" | "tsx") => 0x3a7bd5,
+        (_, "md" | "markdown") => 0x5aa0e0,
+        (_, "json" | "toml" | "yaml" | "yml" | "ini" | "cfg") => 0x9c7ad6,
+        (_, "html" | "htm" | "xml" | "svg") => 0xe06b3c,
+        (_, "css" | "scss" | "sass" | "less") => 0x4aa3df,
+        (_, "sh" | "bash" | "zsh" | "ps1" | "bat" | "cmd") => 0x6cbf5f,
+        (_, "c" | "h" | "cpp" | "hpp" | "cc" | "cs") => 0x5d8fd6,
+        (_, "go") => 0x46b8d6,
+        (_, "java" | "kt") => 0xd57a3a,
+        (_, "png" | "jpg" | "jpeg" | "gif" | "webp" | "ico") => 0x4fae86,
+        (_, "sql" | "db" | "sqlite") => 0xcf8fc4,
+        _ => return COR_TEXTO_MUTED(),
+    };
+    let canal = |s: u32| ((hex >> s) & 0xff) as f32 / 255.0;
+    Color::rgb(canal(16), canal(8), canal(0))
+}
+
+/// Ícone da árvore: pasta (aberta ou não, `Some`) ou arquivo colorido pelo tipo (`None`).
+pub fn icone_arquivo<'a>(caminho: &Path, pasta: Option<bool>) -> Element<'a, Msg> {
+    match pasta {
+        Some(aberta) => icone_traco(if aberta { "folder-open" } else { "folder" }, 14.0).into(),
+        None => icone_svg(ICONE_ARQUIVO, 14.0, cor_do_tipo(caminho)),
+    }
+}
 
 /// Ícone do trilho na cor pedida; sem o SVG, fica o espaço dele.
 fn icone_svg<'a>(fonte: &str, tamanho: f32, cor: Color) -> Element<'a, Msg> {
@@ -664,8 +729,17 @@ impl Code {
                 )
                 .padding([5, 8])
                 .style(|_, s| item_lista(false, s, 5.0));
+                let e_push = tooltip(
+                    button(text("+ Push").size(12))
+                        .on_press_maybe(pode.then_some(Msg::CommitEPush))
+                        .padding([5, 8])
+                        .style(|_, s| item_lista(false, s, 5.0)),
+                    "Commit e Push",
+                    TooltipPosition::Bottom,
+                )
+                .style(tema::estilo_dica);
                 let mut c = column![
-                    container(column![mensagem, row![commit, gerar].spacing(6)].spacing(6))
+                    container(column![mensagem, row![commit, e_push, gerar].spacing(6)].spacing(6))
                         .padding([4, 12])
                         .width(Length::FILL),
                     Space::new(0.0, 6.0),
@@ -745,7 +819,16 @@ impl Code {
                     v.push(("Salvar", "Ctrl+S", Msg::Salvar, false));
                     v.push(("Salvar tudo", "Ctrl+Shift+S", Msg::SalvarTudo, false));
                     v.push(("Fechar aba", "", Msg::FecharAba(self.ativa), false));
+                    v.push(("Localizar", "§|Ctrl+F", Msg::AbrirBarra(false, false), false));
+                    v.push(("Substituir", "Ctrl+H", Msg::AbrirBarra(false, true), false));
+                    v.push(("Ir para a linha", "Ctrl+G", Msg::AbrirBarra(true, false), false));
                 }
+                v.push((
+                    "Salvar sozinho",
+                    "§",
+                    Msg::AlternarSalvarSozinho,
+                    self.config.salvar_sozinho,
+                ));
                 v.push(("Início", "", Msg::IrInicio, false));
                 v
             }
@@ -885,9 +968,22 @@ impl Code {
         ))
     }
 
-    /// Menu do botão direito no editor: o mesmo visual do menu do topo, aberto onde clicou.
+    /// Menu do botão direito (editor, árvore ou aba): o mesmo visual do menu do topo, aberto onde clicou.
     pub(crate) fn menu_contexto_view(&self) -> Option<Element<'_, Msg>> {
-        let p = self.contexto?;
+        let (p, alvo) = self.contexto.as_ref()?;
+        let itens = match alvo {
+            Alvo::Editor => self.itens_editor()?,
+            Alvo::Arvore(caminho, pasta) => self.itens_arvore(caminho, *pasta),
+            Alvo::Aba(i) => self.itens_aba(*i)?,
+        };
+        // O menu não pode sair da janela: perto da borda, abre para o lado de dentro.
+        let altura = itens.len() as f32 * 28.0 + 24.0;
+        let x = p.x.min(self.tamanho.width - LARGURA_MENU - 8.0).max(0.0);
+        let y = p.y.min(self.tamanho.height - altura - 8.0).max(0.0);
+        Some(menu_flutuante(itens, Point::new(x, y), Msg::MenuContexto(None)))
+    }
+
+    fn itens_editor(&self) -> Option<Vec<Item>> {
         let aba = self.aba()?;
         let selecao = aba.conteudo.selection().is_some_and(|s| !s.is_empty());
         let mut itens: Vec<Item> = Vec::new();
@@ -897,6 +993,8 @@ impl Code {
         }
         itens.push(("Colar", "Ctrl+V", Msg::Colar, false));
         itens.push(("Comentar linha", "§|Ctrl+/", Msg::Comentar, false));
+        itens.push(("Localizar", "Ctrl+F", Msg::AbrirBarra(false, false), false));
+        itens.push(("Ir para a linha", "Ctrl+G", Msg::AbrirBarra(true, false), false));
         if selecao {
             itens.push(("Rodar seleção no terminal", "§", Msg::RodarSelecao, false));
         }
@@ -910,11 +1008,41 @@ impl Code {
             Msg::MandarTrecho,
             false,
         ));
-        // O menu não pode sair da janela: perto da borda, abre para o lado de dentro.
-        let altura = itens.len() as f32 * 28.0 + 24.0;
-        let x = p.x.min(self.tamanho.width - LARGURA_MENU - 8.0).max(0.0);
-        let y = p.y.min(self.tamanho.height - altura - 8.0).max(0.0);
-        Some(menu_flutuante(itens, Point::new(x, y), Msg::MenuContexto(None)))
+        Some(itens)
+    }
+
+    fn itens_arvore(&self, caminho: &Path, pasta: bool) -> Vec<Item> {
+        let c = caminho.to_path_buf();
+        let mut itens: Vec<Item> = Vec::new();
+        if pasta {
+            itens.push(("Novo arquivo…", "", Msg::PedirNome(PedirNome::NovoArquivo(c.clone())), false));
+            itens.push(("Nova pasta…", "", Msg::PedirNome(PedirNome::NovaPasta(c.clone())), false));
+            itens.push(("Abrir no terminal", "", Msg::AbrirTerminalEm(c.clone()), false));
+        } else {
+            itens.push(("Abrir", "", Msg::AbrirArquivo(c.clone()), false));
+            let mudou = matches!(&self.git, Some(Ok(g)) if g.mudancas.iter().any(|(_, p)| *p == c));
+            if mudou {
+                itens.push(("Ver alterações", "", Msg::VerDiff(c.clone()), false));
+            }
+        }
+        itens.push(("Copiar caminho", "§", Msg::CopiarCaminho(c.clone(), false), false));
+        itens.push(("Copiar caminho relativo", "", Msg::CopiarCaminho(c.clone(), true), false));
+        itens.push(("Renomear…", "§", Msg::PedirNome(PedirNome::Renomear(c.clone())), false));
+        itens.push(("Excluir…", "", Msg::Excluir(c), false));
+        itens
+    }
+
+    fn itens_aba(&self, i: usize) -> Option<Vec<Item>> {
+        let aba = self.abas.get(i)?;
+        let todas: Vec<usize> = (0..self.abas.len()).collect();
+        let outras: Vec<usize> = todas.iter().copied().filter(|&j| j != i).collect();
+        Some(vec![
+            ("Fechar", "", Msg::FecharAba(i), false),
+            ("Fechar as outras", "", Msg::FecharAbas(outras), false),
+            ("Fechar todas", "", Msg::FecharAbas(todas), false),
+            ("Copiar caminho", "§", Msg::CopiarCaminho(aba.caminho.clone(), false), false),
+            ("Copiar caminho relativo", "", Msg::CopiarCaminho(aba.caminho.clone(), true), false),
+        ])
     }
 }
 
