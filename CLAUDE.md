@@ -15,7 +15,7 @@ cargo clippy
 ```
 
 Screenshot mode, used to check the UI without clicking through it:
-`FEATHERCODE_CAPTURAR=foto.png cargo run -- <pasta>` captures the window to a PNG and closes it. This mode never writes the user config. Optional flags: `FEATHERCODE_CAPTURAR_ARQUIVO=<relative path>` opens a file, `FEATHERCODE_CAPTURAR_EXEMPLO=1` fills in a sample conversation and terminal, `FEATHERCODE_CAPTURAR_MENU=<n>` leaves top menu `n` open, `FEATHERCODE_CAPTURAR_BARRA=<termo>` opens find and replace with that term, `FEATHERCODE_CAPTURAR_DIALOGO=1` shows the close-tab question for the open file, and `FEATHERCODE_CAPTURAR_PREVIA=1` shows the open Markdown file formatted.
+`FEATHERCODE_CAPTURAR=foto.png cargo run -- <pasta>` captures the window to a PNG and closes it. This mode never writes the user config. Optional flags: `FEATHERCODE_CAPTURAR_ARQUIVO=<relative path>` opens a file, `FEATHERCODE_CAPTURAR_EXEMPLO=1` fills in a sample conversation and terminal, `FEATHERCODE_CAPTURAR_MENU=<n>` leaves top menu `n` open, `FEATHERCODE_CAPTURAR_BARRA=<termo>` opens find and replace with that term, `FEATHERCODE_CAPTURAR_DIALOGO=1` shows the close-tab question for the open file, `FEATHERCODE_CAPTURAR_PREVIA=1` shows the open Markdown file formatted, `FEATHERCODE_CAPTURAR_PROBLEMAS=1` fills the Problems tab with two samples in the open file, and `FEATHERCODE_CAPTURAR_MENU_COMMIT=1` (with `FEATHERCODE_CAPTURAR_GIT=1`) leaves the Commit arrow menu open.
 
 ## Architecture
 
@@ -29,7 +29,14 @@ The app is a single `pelicano::App` (`pelicano::run`). `Code` in `src/main.rs` i
 - **`modelos.rs`**: project templates as file lists. `{nome}` becomes the package name and `{modulo}` the snake_case name.
 - **`paineis.rs`**: left rail (Explorer, Search, Git), the search and Git panels, and the top menu.
 - **`arvore.rs`**: file tree. Folders are read lazily when expanded. The ignored folders are a fixed list (`IGNORADAS`), not `.gitignore`.
+- **`problemas.rs`**: Problems tab (next to Terminal, Rust projects only): runs `cargo check --message-format=json`, keeps the primary span of errors and warnings in the folder's own files, and turns columns into byte ranges for the editor's wavy underline (`pelicano::Warning`). It runs on the ↻ button or when the tab opens empty, not on F5: two cargos would wait on each other's target lock.
 - **`config.rs`**: theme, recents and preferences (`salvar_sozinho` included), stored as JSON in the system config folder (`dirs`).
+
+Git panel: `ler_status` splits `git status --porcelain` into Preparadas (X) and Mudanças (Y; untracked shows "U"). With something staged, Commit takes only the staged files; with nothing staged it runs `add -A` first. The arrow opens Commit e Push / Commit de tudo. Unstaging falls back to `git rm --cached` in a repository with no commit yet.
+
+Diff: side by side by default (`paineis::lado_a_lado` pairs removed and added lines; the missing side is hatched by `hachura`), inline by choice (`config.diff_em_linha`) or when the editor card is under 500 px.
+
+Messages that arrive on their own (git, diff, check, autosave tick…) are in the list at the top of `update` that does not close the open menu.
 
 Editor safety, all in `main.rs`:
 - `Aba::disco` is a hash of the text on disk at the last read or save. `recarregar_abas` (after each agent tool result and turn) reloads clean tabs that changed on disk, and marks dirty ones `conflito`: a yellow strip above the editor offers "Ver diferença" (`paineis::diff_textos`, `git diff --no-index`), "Ficar com a minha" and "Usar a do disco". Autosave skips tabs in conflict.
@@ -54,13 +61,13 @@ Regra que vale para tudo: tela nova é desenhada no artifact primeiro
 - [x] Botão "Título com IA" ao lado de Commit: usa o agente selecionado para sugerir o título a partir do diff e dos nomes de arquivos novos, com revisão antes do commit.
 - [x] Pull, Push, Fetch (rodam numa aba do terminal) e Commit com mensagem (`add -A` + commit).
 - [x] Clicar numa mudança mostra a diferença contra o último commit (em linha, com +/−).
-- [ ] Diferença **lado a lado** (antes | depois, faixa hachurada onde não há linha), como o VS Code;
-      a em linha fica como opção.
+- [x] Diferença **lado a lado** (05/11), com faixa hachurada; a em linha fica como opção. O desenho
+      aprovado dizia voltar à em linha abaixo de 900 px, mas com Git e agente abertos o editor tem
+      ~560 px: o limite ficou em 500.
 - [x] No Gráfico, clicar num commit abre a lista de arquivos dele; clicar no arquivo mostra a
       diferença daquele commit (`git show <hash> -- arquivo`).
-- [x] Enter no campo da mensagem já faz o commit; botão "+ Push" ao lado faz Commit e Push (05/11).
-- [ ] "Commit (só o preparado)": depende de preparar arquivo por arquivo.
-- [ ] Preparar/despreparar arquivo por arquivo (+ / −), como "Staged Changes".
+- [x] Enter no campo da mensagem faz o commit; a seta ao lado abre Commit e Push e Commit de tudo (05/11).
+- [x] Preparar/despreparar arquivo por arquivo (+ / −), Preparadas e Mudanças separadas (05/11).
 
 **Editor (feito em 19/10):** Ctrl+Z/Ctrl+Y (hoje o do próprio `text_editor` do pelicano); linha do
 cursor destacada; trilho no estilo do VS Code; só a pena no topo.
@@ -106,7 +113,8 @@ cursor destacada; trilho no estilo do VS Code; só a pena no topo.
     Terminal (Ctrl+`), Quebra de linha (Alt+Z), Layout do editor (dividir).
   - Ir: Ir para arquivo (Ctrl+P, já existe), Ir para linha (Ctrl+G), Voltar/Avançar.
   - Terminal: Dividir terminal, Rodar arquivo ativo, Rodar texto selecionado.
-  - Depois: Problemas (erros do `cargo check`/linters na lista, clicar leva à linha).
+  - [x] Problemas (05/11): erros do `cargo check` na lista, clicar leva à linha, sublinhado no
+    editor, "Pedir ao agente para corrigir" põe a lista no campo do chat.
 - Não vale (por ora):
   - Workspaces (adicionar pasta ao workspace, salvar/duplicar workspace), perfis, Compartilhar,
     Emmet, Extensões.

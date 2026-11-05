@@ -44,6 +44,8 @@ pub struct Config {
     pub linhas_alternadas: bool,
     /// Grava as abas com mudança a cada poucos segundos.
     pub salvar_sozinho: bool,
+    /// Diferença em linha (+/−) em vez de lado a lado.
+    pub diff_em_linha: bool,
 }
 
 fn caminho() -> Option<PathBuf> {
@@ -94,6 +96,7 @@ impl Config {
             tema_codigo: v["tema_codigo"].as_u64().map(|n| n as usize),
             linhas_alternadas: v["linhas_alternadas"].as_bool().unwrap_or(false),
             salvar_sozinho: v["salvar_sozinho"].as_bool().unwrap_or(false),
+            diff_em_linha: v["diff_em_linha"].as_bool().unwrap_or(false),
         }
     }
 
@@ -123,6 +126,7 @@ impl Config {
             "tema_codigo": self.tema_codigo,
             "linhas_alternadas": self.linhas_alternadas,
             "salvar_sozinho": self.salvar_sozinho,
+            "diff_em_linha": self.diff_em_linha,
         });
         // Preferência perdida não é dado do usuário: falha ao gravar só é ignorada.
         let _ = std::fs::create_dir_all(c.parent().expect("config tem pasta"));

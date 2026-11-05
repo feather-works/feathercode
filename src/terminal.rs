@@ -136,24 +136,61 @@ impl Code {
             .style(move |_, s| item_lista(ativa, s, 5.0))
             .into()
         });
-        let cabecalho = container(
-            row![
-                text("TERMINAL")
-                    .size(11)
-                    .font(NEGRITO)
-                    .color(COR_TEXTO_MUTED()),
-                row(abas).spacing(4).align(Align::Center),
-                botao_icone("plus", Msg::NovoTerminal),
-                horizontal_space(),
-                botao_icone("x", Msg::AlternarTerminal),
-            ]
+        let tem_problemas = crate::problemas::disponivel(&self.arvore.raiz);
+        let titulo = |rotulo: String, ativo: bool, msg: Msg| -> Element<'_, Msg> {
+            button(text(rotulo).size(11).font(NEGRITO).color(if ativo {
+                COR_TEXTO()
+            } else {
+                COR_TEXTO_MUTED()
+            }))
+            .on_press(msg)
+            .padding([2, 4])
+            .style(|_, s| item_lista(false, s, 4.0))
+            .into()
+        };
+        let vendo = self.vendo_problemas && tem_problemas;
+        let mut topo = row![titulo("TERMINAL".into(), !vendo, Msg::VerProblemas(false))]
             .spacing(10)
-            .align(Align::Center),
-        )
-        .padding([0, 10])
-        .width(Length::FILL)
-        .height(30.0)
-        .align_y(Align::Center);
+            .align(Align::Center);
+        if tem_problemas {
+            let erros = self.problemas.iter().filter(|p| p.erro).count();
+            let rotulo = match self.problemas.len() {
+                0 => "PROBLEMAS".to_string(),
+                n => format!("PROBLEMAS {n}"),
+            };
+            let mut t = titulo(rotulo, vendo, Msg::VerProblemas(true));
+            if erros > 0 {
+                t = row![t, text("●").size(9).color(COR_ERRO())].spacing(2).align(Align::Center).into();
+            }
+            topo = topo.push(t);
+        }
+        if vendo {
+            topo = topo.push(horizontal_space()).push(botao_texto(
+                text(if self.checando { "Checando…" } else { "↻ cargo check" }).size(11),
+                Msg::Checar,
+            ));
+            if !self.problemas.is_empty() {
+                topo = topo.push(botao_texto(
+                    text("✦ Pedir ao agente para corrigir").size(11),
+                    Msg::CorrigirComAgente,
+                ));
+            }
+        } else {
+            topo = topo
+                .push(row(abas).spacing(4).align(Align::Center))
+                .push(botao_icone("plus", Msg::NovoTerminal))
+                .push(horizontal_space());
+        }
+        let cabecalho = container(topo.push(botao_icone("x", Msg::AlternarTerminal)))
+            .padding([0, 10])
+            .width(Length::FILL)
+            .height(30.0)
+            .align_y(Align::Center);
+        if vendo {
+            return column![cabecalho, linha_horizontal(), self.problemas_view()]
+                .height(self.altura_terminal)
+                .into();
+        }
         let corpo: Element<Msg> = match t.ativo() {
             Some(termo) => pelicano::terminal(termo)
                 .id(id_widget(termo.id()))
@@ -185,5 +222,52 @@ impl Code {
         ]
         .height(self.altura_terminal)
         .into()
+    }
+
+    fn problemas_view(&self) -> Element<'_, Msg> {
+        let corpo: Element<Msg> = if self.problemas.is_empty() {
+            container(
+                text(if self.checando {
+                    "Rodando o cargo check…"
+                } else {
+                    "Nenhum problema no último cargo check."
+                })
+                .size(12)
+                .color(COR_TEXTO_MUTED()),
+            )
+            .padding([8, 12])
+            .into()
+        } else {
+            let itens = self.problemas.iter().map(|p| {
+                let (marca, cor) = if p.erro { ("●", COR_ERRO()) } else { ("▲", AMARELO) };
+                button(
+                    row![
+                        text(marca).size(10).color(cor),
+                        text(p.onde(&self.arvore.raiz))
+                            .size(11)
+                            .font(MONO)
+                            .color(COR_TEXTO_MUTED())
+                            .no_wrap(),
+                        text(p.mensagem.as_str()).size(12).no_wrap()
+                    ]
+                    .spacing(8)
+                    .width(Length::FILL)
+                    .align(Align::Center),
+                )
+                .on_press(Msg::IrPara(p.caminho.clone(), p.linha - 1))
+                .width(Length::FILL)
+                .padding([3, 12])
+                .style(|_, s| item_lista(false, s, 0.0))
+                .into()
+            });
+            rolagem(column(itens).width(Length::FILL))
+                .height(Length::FILL)
+                .into()
+        };
+        container(corpo)
+            .width(Length::FILL)
+            .height(Length::FILL)
+            .style(|_| fundo(cor_terminal()))
+            .into()
     }
 }

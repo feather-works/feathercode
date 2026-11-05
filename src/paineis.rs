@@ -98,6 +98,9 @@ pub struct Commit {
 
 #[derive(Debug, Clone)]
 pub struct EstadoGit {
+    /// No índice (`git add`): vão no próximo commit.
+    pub preparadas: Vec<(String, PathBuf)>,
+    /// Na pasta e ainda não preparadas (as novas aparecem com "U").
     pub mudancas: Vec<(String, PathBuf)>,
     pub grafo: Vec<LinhaGrafo>,
 }
@@ -137,7 +140,7 @@ fn ler_grafo(saida: &str) -> Vec<LinhaGrafo> {
 
 /// Mudanças (`git status`) e os últimos commits de todos os ramos com o desenho do grafo.
 pub async fn status_git(raiz: PathBuf) -> Result<EstadoGit, String> {
-    let mudancas = mudancas_git(&raiz).await?;
+    let (preparadas, mudancas) = mudancas_git(&raiz).await?;
     let log = crate::sistema::comando("git")
         .args([
             "log",
@@ -158,12 +161,21 @@ pub async fn status_git(raiz: PathBuf) -> Result<EstadoGit, String> {
     } else {
         Vec::new()
     };
-    Ok(EstadoGit { mudancas, grafo })
+    Ok(EstadoGit {
+        preparadas,
+        mudancas,
+        grafo,
+    })
 }
 
 /// Prepara tudo e faz o commit; a mensagem vai como argumento, sem passar por shell.
-pub async fn commit(raiz: PathBuf, mensagem: String) -> Result<(), String> {
-    for args in [vec!["add", "-A"], vec!["commit", "-m", &mensagem]] {
+/// Faz o commit; `tudo` prepara a pasta inteira antes (sem nada preparado, é o que se espera).
+pub async fn commit(raiz: PathBuf, mensagem: String, tudo: bool) -> Result<(), String> {
+    let mut passos = vec![vec!["commit", "-m", &mensagem]];
+    if tudo {
+        passos.insert(0, vec!["add", "-A"]);
+    }
+    for args in passos {
         let s = crate::sistema::comando("git")
             .args(&args)
             .current_dir(&raiz)
@@ -317,6 +329,39 @@ fn ler_name_status(s: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// As linhas da diferença em pares (antes, depois) para a vista lado a lado: num trecho
+/// mudado, as removidas ficam à esquerda e as novas à direita, na mesma altura; o lado que tem
+/// menos linhas fica com `None` (a faixa hachurada). O começo de trecho ('@') vem nos dois lados.
+pub fn lado_a_lado(linhas: &[LinhaDiff]) -> Vec<(Option<&LinhaDiff>, Option<&LinhaDiff>)> {
+    let mut v = Vec::new();
+    let (mut tiradas, mut postas): (Vec<&LinhaDiff>, Vec<&LinhaDiff>) = (Vec::new(), Vec::new());
+    type Par<'a> = (Option<&'a LinhaDiff>, Option<&'a LinhaDiff>);
+    fn despejar<'a>(v: &mut Vec<Par<'a>>, t: &mut Vec<&'a LinhaDiff>, p: &mut Vec<&'a LinhaDiff>) {
+        for i in 0..t.len().max(p.len()) {
+            v.push((t.get(i).copied(), p.get(i).copied()));
+        }
+        t.clear();
+        p.clear();
+    }
+    for l in linhas {
+        match l.tipo {
+            // Removida depois de uma adicionada é outra mudança: fecha a anterior.
+            '-' if !postas.is_empty() => {
+                despejar(&mut v, &mut tiradas, &mut postas);
+                tiradas.push(l);
+            }
+            '-' => tiradas.push(l),
+            '+' => postas.push(l),
+            _ => {
+                despejar(&mut v, &mut tiradas, &mut postas);
+                v.push((Some(l), Some(l)));
+            }
+        }
+    }
+    despejar(&mut v, &mut tiradas, &mut postas);
+    v
+}
+
 fn ler_diff(s: &str) -> Vec<LinhaDiff> {
     let mut v = Vec::new();
     let (mut a, mut d) = (0, 0);
@@ -367,7 +412,7 @@ fn ler_diff(s: &str) -> Vec<LinhaDiff> {
     v
 }
 
-async fn mudancas_git(raiz: &Path) -> Result<Vec<(String, PathBuf)>, String> {
+async fn mudancas_git(raiz: &Path) -> Result<(Vec<(String, PathBuf)>, Vec<(String, PathBuf)>), String> {
     let saida = crate::sistema::comando("git")
         .args(["status", "--porcelain=v1", "-uall"])
         .current_dir(raiz)
@@ -377,18 +422,52 @@ async fn mudancas_git(raiz: &Path) -> Result<Vec<(String, PathBuf)>, String> {
     if !saida.status.success() {
         return Err(String::from_utf8_lossy(&saida.stderr).trim().to_string());
     }
-    Ok(String::from_utf8_lossy(&saida.stdout)
-        .lines()
-        .filter(|l| l.len() > 3)
-        .map(|l| {
-            let caminho = l[3..]
-                .rsplit(" -> ")
-                .next()
-                .unwrap_or(&l[3..])
-                .trim_matches('"');
-            (l[..2].trim().to_string(), raiz.join(caminho))
-        })
-        .collect())
+    Ok(ler_status(&String::from_utf8_lossy(&saida.stdout), raiz))
+}
+
+/// "XY caminho": X é o índice (preparadas), Y a pasta (mudanças). "MM" aparece nas duas listas.
+fn ler_status(s: &str, raiz: &Path) -> (Vec<(String, PathBuf)>, Vec<(String, PathBuf)>) {
+    let (mut preparadas, mut mudancas) = (Vec::new(), Vec::new());
+    for l in s.lines().filter(|l| l.len() > 3 && l.is_char_boundary(3)) {
+        let caminho = l[3..].rsplit(" -> ").next().unwrap_or(&l[3..]).trim_matches('"');
+        let caminho = raiz.join(caminho);
+        let (x, y) = (l.as_bytes()[0] as char, l.as_bytes()[1] as char);
+        if x == '?' {
+            mudancas.push(("U".to_string(), caminho));
+            continue;
+        }
+        if x != ' ' {
+            preparadas.push((x.to_string(), caminho.clone()));
+        }
+        if y != ' ' {
+            mudancas.push((y.to_string(), caminho));
+        }
+    }
+    (preparadas, mudancas)
+}
+
+/// Prepara (`git add`) ou tira da preparação um arquivo, ou todos com `None`.
+pub async fn preparar(raiz: PathBuf, caminho: Option<PathBuf>, sim: bool) -> Result<(), String> {
+    let rodar = |args: Vec<std::ffi::OsString>| {
+        crate::sistema::comando("git").args(args).current_dir(&raiz).output()
+    };
+    let alvo: std::ffi::OsString = caminho.map_or_else(|| ".".into(), |c| c.into_os_string());
+    let r = if sim {
+        rodar(vec!["add".into(), "-A".into(), "--".into(), alvo]).await
+    } else {
+        let r = rodar(vec!["restore".into(), "--staged".into(), "--".into(), alvo.clone()]).await;
+        match r {
+            Ok(s) if s.status.success() => Ok(s),
+            // Repositório sem commit ainda: não há HEAD para voltar, então tira do índice.
+            _ => rodar(vec!["rm".into(), "-r".into(), "--cached".into(), "-q".into(), "--".into(), alvo]).await,
+        }
+    };
+    let s = r.map_err(|e| format!("Não deu para rodar o git: {e}"))?;
+    if s.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&s.stderr).trim().to_string())
+    }
 }
 
 // Ícones do trilho (Tabler, MIT): o catálogo da feather-ui não tem estes. A cor vem do estilo.
@@ -695,9 +774,14 @@ impl Code {
                     .size(13)
                     .padding([6, 8])
                     .style(campo(COR_PAINEL()));
-                let pode = !g.mudancas.is_empty() && !self.mensagem_commit.trim().is_empty();
+                let algo = !g.mudancas.is_empty() || !g.preparadas.is_empty();
+                let pode = algo && !self.mensagem_commit.trim().is_empty();
+                let rotulo = match g.preparadas.len() {
+                    0 => "Commit".to_string(),
+                    n => format!("Commit ({n})"),
+                };
                 let commit = button(
-                    container(text("Commit").size(12).font(NEGRITO).color(COR_PAINEL()))
+                    container(text(rotulo).size(12).font(NEGRITO).color(COR_PAINEL()))
                         .width(Length::FILL)
                         .align_x(Align::Center),
                 )
@@ -724,29 +808,57 @@ impl Code {
                     .size(12),
                 )
                 .on_press_maybe(
-                    (self.titulo_pendente.is_none() && !g.mudancas.is_empty())
+                    (self.titulo_pendente.is_none() && algo)
                         .then_some(Msg::GerarTituloCommit),
                 )
                 .padding([5, 8])
                 .style(|_, s| item_lista(false, s, 5.0));
-                let e_push = tooltip(
-                    button(text("+ Push").size(12))
-                        .on_press_maybe(pode.then_some(Msg::CommitEPush))
-                        .padding([5, 8])
-                        .style(|_, s| item_lista(false, s, 5.0)),
-                    "Commit e Push",
+                // A seta abre o menu onde clicou: Commit e Push, Commit de tudo.
+                let seta = tooltip(
+                    ao_clicar(
+                        container(icone_traco("chevron-down", 13.0))
+                            .padding([6, 6])
+                            .style(|_| fundo(COR_HOVER()).border(Border::rounded(5.0))),
+                        |p| Msg::MenuContexto(Some((p, Alvo::Commit))),
+                    ),
+                    "Mais opções de commit",
                     TooltipPosition::Bottom,
                 )
                 .style(tema::estilo_dica);
                 let mut c = column![
-                    container(column![mensagem, row![commit, e_push, gerar].spacing(6)].spacing(6))
+                    container(column![mensagem, row![commit, seta, gerar].spacing(6).align(Align::Center)].spacing(6))
                         .padding([4, 12])
                         .width(Length::FILL),
                     Space::new(0.0, 6.0),
-                    subtitulo_git(format!("Mudanças ({})", g.mudancas.len()))
                 ]
                 .width(Length::FILL);
-                if g.mudancas.is_empty() {
+                if !g.preparadas.is_empty() {
+                    c = c.push(subtitulo_com_acao(
+                        format!("Preparadas ({})", g.preparadas.len()),
+                        "− todas",
+                        Msg::Preparar(None, false),
+                    ));
+                    for (sigla, p) in &g.preparadas {
+                        c = c.push(self.linha_mudanca(
+                            sigla,
+                            p,
+                            Msg::VerDiff(p.clone()),
+                            12.0,
+                            Some(("−", Msg::Preparar(Some(p.clone()), false))),
+                        ));
+                    }
+                    c = c.push(Space::new(0.0, 6.0));
+                }
+                c = c.push(if g.mudancas.is_empty() {
+                    subtitulo_git("Mudanças (0)".into())
+                } else {
+                    subtitulo_com_acao(
+                        format!("Mudanças ({})", g.mudancas.len()),
+                        "+ todas",
+                        Msg::Preparar(None, true),
+                    )
+                });
+                if g.mudancas.is_empty() && g.preparadas.is_empty() {
                     c = c.push(
                         container(
                             text("Nada mudou desde o último commit.")
@@ -757,7 +869,13 @@ impl Code {
                     );
                 }
                 for (sigla, p) in &g.mudancas {
-                    c = c.push(self.linha_mudanca(sigla, p, Msg::VerDiff(p.clone()), 12.0));
+                    c = c.push(self.linha_mudanca(
+                        sigla,
+                        p,
+                        Msg::VerDiff(p.clone()),
+                        12.0,
+                        Some(("+", Msg::Preparar(Some(p.clone()), true))),
+                    ));
                 }
                 c = c
                     .push(Space::new(0.0, 10.0))
@@ -775,6 +893,7 @@ impl Code {
                                 p,
                                 Msg::VerDiffCommit(hash.clone(), p.clone()),
                                 30.0,
+                                None,
                             ));
                         }
                     }
@@ -975,6 +1094,7 @@ impl Code {
             Alvo::Editor => self.itens_editor()?,
             Alvo::Arvore(caminho, pasta) => self.itens_arvore(caminho, *pasta),
             Alvo::Aba(i) => self.itens_aba(*i)?,
+            Alvo::Commit => self.itens_commit()?,
         };
         // O menu não pode sair da janela: perto da borda, abre para o lado de dentro.
         let altura = itens.len() as f32 * 28.0 + 24.0;
@@ -1020,7 +1140,8 @@ impl Code {
             itens.push(("Abrir no terminal", "", Msg::AbrirTerminalEm(c.clone()), false));
         } else {
             itens.push(("Abrir", "", Msg::AbrirArquivo(c.clone()), false));
-            let mudou = matches!(&self.git, Some(Ok(g)) if g.mudancas.iter().any(|(_, p)| *p == c));
+            let mudou = matches!(&self.git, Some(Ok(g))
+                if g.mudancas.iter().chain(&g.preparadas).any(|(_, p)| *p == c));
             if mudou {
                 itens.push(("Ver alterações", "", Msg::VerDiff(c.clone()), false));
             }
@@ -1030,6 +1151,25 @@ impl Code {
         itens.push(("Renomear…", "§", Msg::PedirNome(PedirNome::Renomear(c.clone())), false));
         itens.push(("Excluir…", "", Msg::Excluir(c), false));
         itens
+    }
+
+    fn itens_commit(&self) -> Option<Vec<Item>> {
+        let Some(Ok(g)) = &self.git else { return None };
+        let mut v: Vec<Item> = vec![(
+            if g.preparadas.is_empty() {
+                "Commit"
+            } else {
+                "Commit das preparadas"
+            },
+            "Enter",
+            Msg::Commit,
+            false,
+        )];
+        v.push(("Commit e Push", "", Msg::CommitEPush, false));
+        if !g.preparadas.is_empty() {
+            v.push(("Commit de tudo", "§", Msg::CommitTudo, false));
+        }
+        Some(v)
     }
 
     fn itens_aba(&self, i: usize) -> Option<Vec<Item>> {
@@ -1133,6 +1273,22 @@ fn botao_git(rotulo: &'static str, comando: &'static str) -> Element<'static, Ms
     .into()
 }
 
+/// Subtítulo com uma ação à direita ("+ todas", "− todas").
+fn subtitulo_com_acao(t: String, rotulo: &'static str, msg: Msg) -> Element<'static, Msg> {
+    row![
+        container(subtitulo_git(t)).width(Length::FILL),
+        container(
+            button(text(rotulo).size(11).color(COR_TEXTO_MUTED()))
+                .on_press(msg)
+                .padding([1, 6])
+                .style(|_, s| item_lista(false, s, 4.0))
+        )
+        .padding([0, 8]),
+    ]
+    .align(Align::Center)
+    .into()
+}
+
 fn subtitulo_git(t: String) -> Element<'static, Msg> {
     container(text(t).size(11).font(NEGRITO).color(COR_TEXTO_MUTED()))
         .padding([4, 12])
@@ -1152,13 +1308,15 @@ fn cor_do_ramo(coluna: usize) -> Color {
 }
 
 impl Code {
-    /// Arquivo mudado (em Mudanças ou dentro de um commit do gráfico): nome e sigla colorida.
+    /// Arquivo mudado (em Mudanças ou dentro de um commit do gráfico): nome e sigla colorida;
+    /// `acao` é o + ou − de preparar.
     fn linha_mudanca<'a>(
         &self,
         sigla: &str,
         p: &Path,
         ao_clicar: Msg,
         recuo: f32,
+        acao: Option<(&'static str, Msg)>,
     ) -> Element<'a, Msg> {
         let cor = match sigla {
             "M" | "MM" | "AM" => AMARELO,
@@ -1166,13 +1324,24 @@ impl Code {
             _ => VERDE,
         };
         let nome = self.relativo(p).display().to_string();
-        button(
-            row![
-                text(nome).size(12).width(Length::FILL),
-                text(sigla.to_string()).font(MONO).size(11).color(cor)
-            ]
-            .spacing(6),
-        )
+        let mut linha = row![text(nome).size(12).width(Length::FILL)]
+            .spacing(6)
+            .align(Align::Center);
+        if let Some((sinal, msg)) = acao {
+            let dica = if sinal == "+" { "Preparar" } else { "Tirar da preparação" };
+            linha = linha.push(
+                tooltip(
+                    button(text(sinal).font(MONO).size(12).color(COR_TEXTO_MUTED()))
+                        .on_press(msg)
+                        .padding([0, 5])
+                        .style(|_, s| item_lista(false, s, 4.0)),
+                    dica,
+                    TooltipPosition::Left,
+                )
+                .style(tema::estilo_dica),
+            );
+        }
+        button(linha.push(text(sigla.to_string()).font(MONO).size(11).color(cor)))
         .on_press(ao_clicar)
         .width(Length::FILL)
         .padding(Padding {
@@ -1369,4 +1538,67 @@ pub async fn titulo_por_ia(raiz: PathBuf, provedor: agente::Provedor) -> Result<
         return Err("Não há alterações para resumir.".into());
     }
     agente::sugerir_titulo(provedor, raiz, contexto).await
+}
+
+#[cfg(test)]
+mod testes_status {
+    use super::*;
+
+    #[test]
+    fn status_separa_preparadas_de_mudancas() {
+        let raiz = Path::new("/r");
+        let (p, m) = ler_status("M  a.rs\nMM b.rs\n M c.rs\n?? novo.rs\nR  velho.rs -> d.rs\n D e.rs\n", raiz);
+        let nomes = |v: &[(String, PathBuf)]| {
+            v.iter()
+                .map(|(s, c)| format!("{s} {}", c.strip_prefix(raiz).unwrap().display()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(nomes(&p), ["M a.rs", "M b.rs", "R d.rs"]);
+        assert_eq!(nomes(&m), ["M b.rs", "M c.rs", "U novo.rs", "D e.rs"]);
+    }
+
+    #[test]
+    fn preparar_tirar_e_commit_so_do_preparado() {
+        let raiz = std::env::temp_dir().join(format!("feathercode-preparar-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&raiz);
+        std::fs::create_dir_all(&raiz).unwrap();
+        let git = |args: &[&str]| {
+            let s = std::process::Command::new("git").args(args).current_dir(&raiz).output().unwrap();
+            String::from_utf8_lossy(&s.stdout).into_owned()
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.name", "Teste"]);
+        git(&["config", "user.email", "teste@exemplo"]);
+        std::fs::write(raiz.join("a.txt"), "a").unwrap();
+        std::fs::write(raiz.join("b.txt"), "b").unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            // Sem commit ainda: tirar da preparação cai no `git rm --cached`.
+            preparar(raiz.clone(), Some(raiz.join("a.txt")), true).await.unwrap();
+            preparar(raiz.clone(), Some(raiz.join("a.txt")), false).await.unwrap();
+            assert_eq!(git(&["status", "--porcelain"]), "?? a.txt\n?? b.txt\n");
+            preparar(raiz.clone(), Some(raiz.join("a.txt")), true).await.unwrap();
+            commit(raiz.clone(), "só o a".into(), false).await.unwrap();
+        });
+        assert_eq!(git(&["status", "--porcelain"]), "?? b.txt\n");
+        rt.block_on(async {
+            preparar(raiz.clone(), None, true).await.unwrap();
+            preparar(raiz.clone(), None, false).await.unwrap();
+        });
+        assert_eq!(git(&["status", "--porcelain"]), "?? b.txt\n");
+        std::fs::remove_dir_all(&raiz).unwrap();
+    }
+
+    #[test]
+    fn lado_a_lado_alinha_removidas_e_novas() {
+        let d = ler_diff("@@ -5,3 +5,5 @@\n a\n-b\n+b1\n+b2\n+b3\n c\n-d\n");
+        let pares: Vec<String> = lado_a_lado(&d)
+            .iter()
+            .map(|(e, d)| {
+                let t = |l: &Option<&LinhaDiff>| l.map_or("_".to_string(), |l| format!("{}{}", l.tipo, l.texto));
+                format!("{}|{}", t(e), t(d))
+            })
+            .collect();
+        assert_eq!(pares, ["@|@", " a| a", "-b|+b1", "_|+b2", "_|+b3", " c| c", "-d|_"]);
+    }
 }

@@ -10,6 +10,7 @@ mod inicio;
 mod modelos;
 mod paineis;
 mod preferencias;
+mod problemas;
 mod sistema;
 mod terminal;
 
@@ -262,6 +263,54 @@ impl pelicano::Widget<Msg> for Sublinhado<'_> {
     }
 }
 
+/// Avisa o clique (com o ponto, na janela) sem tomar o evento: o filho continua recebendo.
+/// O editor pega o clique esquerdo antes de uma `mouse_area`; assim o app sabe qual lado foi clicado.
+struct AoClicar<'a> {
+    filho: Element<'a, Msg>,
+    msg: Box<dyn Fn(Point) -> Msg + 'a>,
+}
+
+fn ao_clicar<'a>(filho: impl Into<Element<'a, Msg>>, msg: impl Fn(Point) -> Msg + 'a) -> Element<'a, Msg> {
+    Element::new(AoClicar {
+        filho: filho.into(),
+        msg: Box::new(msg),
+    })
+}
+
+impl pelicano::Widget<Msg> for AoClicar<'_> {
+    fn size(&self) -> (Length, Length) {
+        self.filho.widget().size()
+    }
+    fn layout(&self, cx: &mut pelicano::LayoutCx, l: pelicano::Limits) -> pelicano::Node {
+        let n = cx.child(0, &self.filho, l);
+        pelicano::Node {
+            rect: n.rect,
+            key: cx.key(),
+            children: vec![n],
+            ..Default::default()
+        }
+    }
+    fn draw(&self, n: &pelicano::Node, cx: &mut pelicano::DrawCx) {
+        self.filho.widget().draw(&n.children[0], cx);
+    }
+    fn event(
+        &self,
+        n: &pelicano::Node,
+        ev: &Event,
+        cx: &mut pelicano::EventCx<Msg>,
+    ) -> pelicano::Captured {
+        if let (Event::MousePressed(pelicano::MouseButton::Left), Some(p)) = (ev, cx.cursor) {
+            if n.rect.contains(p) {
+                cx.publish((self.msg)(p));
+            }
+        }
+        self.filho.widget().event(&n.children[0], ev, cx)
+    }
+    fn opaque_at(&self, n: &pelicano::Node, p: Point) -> bool {
+        self.filho.widget().opaque_at(&n.children[0], p)
+    }
+}
+
 /// Pergunta que espera resposta num diálogo.
 #[derive(Debug, Clone, PartialEq)]
 enum Confirmar {
@@ -287,6 +336,8 @@ enum Alvo {
     /// Item da árvore: caminho e se é pasta.
     Arvore(PathBuf, bool),
     Aba(usize),
+    /// A seta do botão Commit.
+    Commit,
 }
 
 /// Barra no topo do editor: localizar (e substituir) ou ir para a linha.
@@ -451,8 +502,21 @@ enum Msg {
     Previa,
     AbrirNoNavegador,
     CommitEPush,
+    /// Commit da pasta inteira, mesmo com algo preparado.
+    CommitTudo,
+    /// Prepara (`true`) ou tira da preparação um arquivo, ou todos (`None`).
+    Preparar(Option<PathBuf>, bool),
+    Preparado(Result<(), String>),
+    /// Roda o `cargo check` e enche a lista de Problemas.
+    Checar,
+    Checado(PathBuf, Result<Vec<problemas::Problema>, String>),
+    /// Painel de baixo: `true` mostra Problemas, `false` o terminal.
+    VerProblemas(bool),
+    CorrigirComAgente,
     AlternarSalvarSozinho,
     SalvarSozinho,
+    /// Diferença em linha (`true`) ou lado a lado.
+    DiffEmLinha(bool),
     Recortar,
     CopiarSelecao,
     Colar,
@@ -576,6 +640,10 @@ struct Code {
     barra: Option<Barra>,
     /// Faz o push quando o commit em andamento terminar.
     push_depois: bool,
+    problemas: Vec<problemas::Problema>,
+    checando: bool,
+    /// O painel de baixo mostra Problemas em vez do terminal.
+    vendo_problemas: bool,
 }
 
 impl pelicano::App for Code {
@@ -720,6 +788,9 @@ impl Code {
             pedir_nome: None,
             barra: None,
             push_depois: false,
+            problemas: Vec::new(),
+            checando: false,
+            vendo_problemas: false,
         };
         let mut code = code;
         if !code.inicio {
@@ -754,6 +825,22 @@ impl Code {
             let _ = code.update(Msg::AbrirBarra(false, true));
             let _ = code.update(Msg::TermoBarra(termo));
         }
+        // FEATHERCODE_CAPTURAR_PROBLEMAS=1 mostra a aba Problemas com dois exemplos no arquivo aberto.
+        if let (Some(_), Some(aba)) = (std::env::var_os("FEATHERCODE_CAPTURAR_PROBLEMAS"), code.abas.first()) {
+            let exemplo = |linha, erro, mensagem: &str| problemas::Problema {
+                caminho: aba.caminho.clone(),
+                linha,
+                coluna: 5,
+                fim: Some(12),
+                erro,
+                mensagem: mensagem.into(),
+            };
+            code.problemas = vec![
+                exemplo(2, true, "mismatched types: expected `usize`, found `String`"),
+                exemplo(6, false, "function `velho` is never used"),
+            ];
+            code.vendo_problemas = true;
+        }
         // FEATHERCODE_CAPTURAR_PREVIA=1 mostra o Markdown aberto formatado.
         if std::env::var_os("FEATHERCODE_CAPTURAR_PREVIA").is_some() {
             let _ = code.update(Msg::Previa);
@@ -784,6 +871,11 @@ impl Code {
                 git,
                 code.update(Msg::VerDiff(code.arvore.raiz.join(arquivo))),
             ]);
+        }
+        // Depois do Git e do diff: qualquer mensagem fecha os menus.
+        // FEATHERCODE_CAPTURAR_MENU_COMMIT=1 deixa aberto o menu da seta do Commit.
+        if std::env::var_os("FEATHERCODE_CAPTURAR_MENU_COMMIT").is_some() {
+            code.contexto = Some((Point::new(paineis::LARGURA_TRILHO + 150.0, 140.0), Alvo::Commit));
         }
         let capturar = if std::env::var_os("FEATHERCODE_CAPTURAR").is_some() {
             // O `sleep` nasce dentro do async: o `novo` roda antes do runtime do tokio.
@@ -978,6 +1070,8 @@ impl Code {
         self.filtro.clear();
         self.todos_arquivos.clear();
         self.git = None;
+        self.problemas.clear();
+        self.vendo_problemas = false;
         self.outros_chats.clear();
         self.chat = Chat::novo(self.proximo_chat, self.chat.provedor, self.chat.modo);
         self.proximo_chat += 1;
@@ -1070,6 +1164,13 @@ impl Code {
                 | Msg::Term(_, _)
                 | Msg::Git(_)
                 | Msg::Achados(_)
+                | Msg::Diff(_)
+                | Msg::ArquivosCommit(_)
+                | Msg::TituloCommit(..)
+                | Msg::Commitado(_)
+                | Msg::Preparado(_)
+                | Msg::Checado(..)
+                | Msg::SalvarSozinho
                 | Msg::Ini(inicio::Ini::ClaudeVersao(_) | inicio::Ini::OutrosAgentes(_))
         ) {
             self.menu = None;
@@ -1253,6 +1354,52 @@ impl Code {
                     let caminho = aba.caminho.display().to_string();
                     return self.update(Msg::Link(caminho));
                 }
+            }
+            Msg::Checar => {
+                if self.checando || !problemas::disponivel(&self.arvore.raiz) {
+                    return Task::none();
+                }
+                self.checando = true;
+                let raiz = self.arvore.raiz.clone();
+                return Task::perform(problemas::checar(raiz.clone()), move |r| {
+                    Msg::Checado(raiz.clone(), r)
+                });
+            }
+            Msg::Checado(raiz, r) => {
+                self.checando = false;
+                // Resposta de outra pasta (a pessoa trocou durante o check) não vale.
+                if raiz == self.arvore.raiz {
+                    match r {
+                        Ok(v) => self.problemas = v,
+                        Err(e) => self.aviso = e,
+                    }
+                }
+            }
+            Msg::VerProblemas(ver) => {
+                self.vendo_problemas = ver;
+                self.terminal_aberto = true;
+                if ver && self.problemas.is_empty() {
+                    return self.update(Msg::Checar);
+                }
+            }
+            Msg::CorrigirComAgente => {
+                let lista: Vec<String> = self
+                    .problemas
+                    .iter()
+                    .map(|p| {
+                        let tipo = if p.erro { "erro" } else { "aviso" };
+                        format!("- {} {tipo}: {}", p.onde(&self.arvore.raiz), p.mensagem)
+                    })
+                    .collect();
+                if lista.is_empty() {
+                    return Task::none();
+                }
+                self.chat.pedido = Content::with_text(&format!(
+                    "Corrija estes problemas do cargo check:\n{}",
+                    lista.join("\n")
+                ));
+                self.agente_aberto = true;
+                return Task::focus("pedido");
             }
             Msg::CommitEPush => {
                 self.push_depois = true;
@@ -1495,17 +1642,32 @@ impl Code {
                 }
             }
             Msg::MensagemCommit(t) => self.mensagem_commit = t,
-            Msg::Commit => {
-                let msg = self.mensagem_commit.trim().to_string();
-                if msg.is_empty() {
+            Msg::Commit | Msg::CommitTudo => {
+                let msg_commit = self.mensagem_commit.trim().to_string();
+                // Com algo preparado, o commit leva só o preparado (como o VS Code).
+                let tudo = matches!(msg, Msg::CommitTudo)
+                    || !matches!(&self.git, Some(Ok(g)) if !g.preparadas.is_empty());
+                if msg_commit.is_empty() {
                     self.push_depois = false;
                     self.aviso = "Escreva a mensagem do commit.".into();
                 } else {
                     return Task::perform(
-                        paineis::commit(self.arvore.raiz.clone(), msg),
+                        paineis::commit(self.arvore.raiz.clone(), msg_commit, tudo),
                         Msg::Commitado,
                     );
                 }
+            }
+            Msg::Preparar(caminho, sim) => {
+                return Task::perform(
+                    paineis::preparar(self.arvore.raiz.clone(), caminho, sim),
+                    Msg::Preparado,
+                );
+            }
+            Msg::Preparado(r) => {
+                if let Err(e) = r {
+                    self.aviso = e;
+                }
+                return self.update(Msg::GitAtualizar);
             }
             Msg::Commitado(Ok(())) => {
                 self.geracao_titulo += 1;
@@ -1675,6 +1837,10 @@ impl Code {
                 if !erros.is_empty() {
                     self.aviso = format!("Não deu para salvar: {}", erros.join("; "));
                 }
+            }
+            Msg::DiffEmLinha(sim) => {
+                self.config.diff_em_linha = sim;
+                self.config.gravar();
             }
             Msg::AlternarSalvarSozinho => {
                 self.config.salvar_sozinho = !self.config.salvar_sozinho;
@@ -2517,6 +2683,15 @@ impl Code {
         if self.config.linhas_alternadas {
             editor = editor.stripes(COR_TEXTO().alpha(ALFA_LISTRAS));
         }
+        let avisos: Vec<pelicano::Warning> = self
+            .problemas
+            .iter()
+            .filter(|p| p.caminho == aba.caminho)
+            .filter_map(|p| Some(p.sublinhado(&aba.conteudo.line(p.linha)?)))
+            .collect();
+        if !avisos.is_empty() {
+            editor = editor.warnings(avisos);
+        }
         // O editor do pelicano não usa o botão direito: ele chega aqui e abre o menu.
         mouse_area(
             container(editor)
@@ -2656,6 +2831,9 @@ impl Code {
     /// Diferença contra o último commit, em linha (como o modo inline do VS Code).
     fn diff_view<'a>(&'a self, d: &'a paineis::Diff) -> Element<'a, Msg> {
         const MAX: usize = 5000;
+        // Lado a lado precisa de espaço: em editor estreito volta para a vista em linha. Com o
+        // Git e o agente abertos o editor tem uns 560 px; 900 (o do desenho) nunca daria lado a lado.
+        let lado = !self.config.diff_em_linha && self.largura_editor() >= 500.0;
         let (mais, menos) = d.linhas.iter().fold((0, 0), |(m, n), l| match l.tipo {
             '+' => (m + 1, n),
             '-' => (m, n + 1),
@@ -2680,15 +2858,14 @@ impl Code {
                     .font(MONO)
                     .color(COR_ERRO()),
                 horizontal_space(),
-                botao_texto(
-                    row![
-                        icone_traco("file-code", 14.0),
-                        text("Abrir arquivo").size(12)
-                    ]
-                    .spacing(6)
-                    .align(Align::Center),
-                    Msg::AbrirArquivo(d.caminho.clone()),
-                ),
+                botao_modo("Em linha", !lado, Msg::DiffEmLinha(true)),
+                botao_modo("Lado a lado", lado, Msg::DiffEmLinha(false)),
+                tooltip(
+                    botao_icone("file-code", Msg::AbrirArquivo(d.caminho.clone())),
+                    "Abrir arquivo",
+                    TooltipPosition::Bottom
+                )
+                .style(tema::estilo_dica),
                 botao_icone("x", Msg::FecharDiff),
             ]
             .spacing(10)
@@ -2710,7 +2887,10 @@ impl Code {
             .align_x(Align::End)
         };
         let mut lista = column![].width(Length::FILL);
-        for l in d.linhas.iter().take(MAX) {
+        if lado {
+            lista = self.diff_lado_a_lado(d, MAX);
+        }
+        for l in d.linhas.iter().take(if lado { 0 } else { MAX }) {
             let (fundo_linha, sinal, cor_sinal) = match l.tipo {
                 '+' => (VERDE.alpha(0.16), "+", VERDE),
                 '-' => (COR_ERRO().alpha(0.16), "−", COR_ERRO()),
@@ -2792,6 +2972,83 @@ impl Code {
         .width(Length::FILL)
         .height(Length::FILL)
         .into()
+    }
+
+    /// Largura aproximada do cartão do editor, para decidir a vista da diferença.
+    fn largura_editor(&self) -> f32 {
+        let mut w = self.tamanho.width - paineis::LARGURA_TRILHO - VAO;
+        if self.lado.is_some() {
+            w -= self.largura_lado.unwrap_or(LARGURA_ARVORE) + VAO;
+        }
+        if self.agente_aberto {
+            w -= self.largura_agente + VAO;
+        }
+        w
+    }
+
+    /// Antes à esquerda e depois à direita; onde um lado não tem linha, a faixa hachurada.
+    fn diff_lado_a_lado<'a>(&'a self, d: &'a paineis::Diff, max: usize) -> pelicano::Column<'a, Msg> {
+        let numero = |n: Option<usize>| {
+            container(
+                text(n.map_or(String::new(), |n| n.to_string()))
+                    .size(TAMANHO_FONTE - 1.0)
+                    .font(MONO)
+                    .color(COR_TEXTO_MUTED()),
+            )
+            .width(44.0)
+            .align_x(Align::End)
+        };
+        let lado = |l: Option<&'a paineis::LinhaDiff>, antes: bool| -> Element<'a, Msg> {
+            let Some(l) = l else {
+                return canvas(Length::FILL, ALTURA_LINHA, |r, area, _| hachura(r, area)).into();
+            };
+            let cor = match l.tipo {
+                '+' => VERDE.alpha(0.16),
+                '-' => COR_ERRO().alpha(0.16),
+                _ => Color::TRANSPARENT,
+            };
+            container(
+                row![
+                    numero(if antes { l.antes } else { l.depois }),
+                    text(l.texto.as_str()).size(TAMANHO_FONTE).font(MONO).no_wrap()
+                ]
+                .spacing(12)
+                .align(Align::Center),
+            )
+            .width(Length::FILL)
+            .height(ALTURA_LINHA)
+            .align_y(Align::Center)
+            .clip(true)
+            .style(move |_| fundo(cor))
+            .into()
+        };
+        let mut lista = column![].width(Length::FILL);
+        for (antes, depois) in paineis::lado_a_lado(&d.linhas).into_iter().take(max) {
+            if let Some(l) = antes.filter(|l| l.tipo == '@') {
+                lista = lista.push(
+                    container(
+                        text(format!("⋯  {}", l.texto))
+                            .size(TAMANHO_FONTE - 1.0)
+                            .font(MONO)
+                            .color(COR_TEXTO_MUTED())
+                            .no_wrap(),
+                    )
+                    .padding([0, 12])
+                    .width(Length::FILL)
+                    .height(ALTURA_LINHA)
+                    .align_y(Align::Center)
+                    .clip(true)
+                    .style(|_| fundo(COR_AZUL_ACENTO().alpha(0.10))),
+                );
+                continue;
+            }
+            lista = lista.push(
+                row![lado(antes, true), linha_vertical(), lado(depois, false)]
+                    .width(Length::FILL)
+                    .height(ALTURA_LINHA),
+            );
+        }
+        lista
     }
 
     /// Os agentes que dá para escolher: o Claude Code sempre (é o padrão), os outros se instalados.
@@ -3741,6 +3998,44 @@ fn alca<'a>(d: Divisa) -> Element<'a, Msg> {
         .on_press(Msg::Redimensionar(Some(d)))
         .cursor_icon(cursor_da_divisa(d))
         .into()
+}
+
+/// Riscos diagonais na área: onde a vista lado a lado não tem linha.
+fn hachura(r: &mut pelicano::Renderer, a: pelicano::Rect) {
+    use pelicano::{PathBuilder, Stroke};
+    let mut p = PathBuilder::new();
+    let mut d = -a.height;
+    while d < a.width {
+        // Risco de (d, embaixo) até (d + altura, em cima), cortado nas bordas.
+        let (mut x0, mut y0) = (a.x + d, a.y + a.height);
+        let (mut x1, mut y1) = (a.x + d + a.height, a.y);
+        if x0 < a.x {
+            y0 -= a.x - x0;
+            x0 = a.x;
+        }
+        if x1 > a.x + a.width {
+            y1 += x1 - (a.x + a.width);
+            x1 = a.x + a.width;
+        }
+        p.move_to(Point::new(x0, y0)).line_to(Point::new(x1, y1));
+        d += 7.0;
+    }
+    if let Some(p) = p.build() {
+        r.stroke_path(&p, &Stroke::new(1.0), COR_BORDA_SUAVE());
+    }
+}
+
+/// Botão de escolha (Em linha | Lado a lado): o escolhido fica com o fundo do acento.
+fn botao_modo<'a>(rotulo: &'a str, escolhido: bool, msg: Msg) -> Element<'a, Msg> {
+    button(text(rotulo).size(12).color(if escolhido {
+        COR_AZUL_ACENTO()
+    } else {
+        COR_TEXTO_MUTED()
+    }))
+    .on_press(msg)
+    .padding([2, 8])
+    .style(move |_, s| item_lista(escolhido, s, 5.0))
+    .into()
 }
 
 fn mistura_cor(a: Color, b: Color, t: f32) -> Color {
