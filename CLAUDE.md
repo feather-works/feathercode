@@ -15,7 +15,7 @@ cargo clippy
 ```
 
 Screenshot mode, used to check the UI without clicking through it:
-`FEATHERCODE_CAPTURAR=foto.png cargo run -- <pasta>` captures the window to a PNG and closes it. This mode never writes the user config. Optional flags: `FEATHERCODE_CAPTURAR_ARQUIVO=<relative path>` opens a file, `FEATHERCODE_CAPTURAR_EXEMPLO=1` fills in a sample conversation and terminal, `FEATHERCODE_CAPTURAR_MENU=<n>` leaves top menu `n` open, `FEATHERCODE_CAPTURAR_BARRA=<termo>` opens find and replace with that term, `FEATHERCODE_CAPTURAR_DIALOGO=1` shows the close-tab question for the open file, `FEATHERCODE_CAPTURAR_PREVIA=1` shows the open Markdown file formatted, `FEATHERCODE_CAPTURAR_PROBLEMAS=1` fills the Problems tab with two samples in the open file, and `FEATHERCODE_CAPTURAR_MENU_COMMIT=1` (with `FEATHERCODE_CAPTURAR_GIT=1`) leaves the Commit arrow menu open.
+`FEATHERCODE_CAPTURAR=foto.png cargo run -- <pasta>` captures the window to a PNG and closes it. This mode never writes the user config. Optional flags: `FEATHERCODE_CAPTURAR_ARQUIVO=<relative path>` opens a file, `FEATHERCODE_CAPTURAR_EXEMPLO=1` fills in a sample conversation and terminal, `FEATHERCODE_CAPTURAR_MENU=<n>` leaves top menu `n` open, `FEATHERCODE_CAPTURAR_BARRA=<termo>` opens find and replace with that term, `FEATHERCODE_CAPTURAR_DIALOGO=1` shows the close-tab question for the open file, `FEATHERCODE_CAPTURAR_PREVIA=1` shows the open Markdown file formatted, `FEATHERCODE_CAPTURAR_PROBLEMAS=1` fills the Problems tab with two samples in the open file, `FEATHERCODE_CAPTURAR_MENU_COMMIT=1` (with `FEATHERCODE_CAPTURAR_GIT=1`) leaves the Commit arrow menu open, and `FEATHERCODE_CAPTURAR_DIVIDIR=<path>` splits the editor and opens that file on the right.
 
 ## Architecture
 
@@ -35,6 +35,8 @@ The app is a single `pelicano::App` (`pelicano::run`). `Code` in `src/main.rs` i
 Git panel: `ler_status` splits `git status --porcelain` into Preparadas (X) and Mudanças (Y; untracked shows "U"). With something staged, Commit takes only the staged files; with nothing staged it runs `add -A` first. The arrow opens Commit e Push / Commit de tudo. Unstaging falls back to `git rm --cached` in a repository with no commit yet.
 
 Diff: side by side by default (`paineis::lado_a_lado` pairs removed and added lines; the missing side is hatched by `hachura`), inline by choice (`config.diff_em_linha`) or when the editor card is under 500 px.
+
+Split editor: `self.abas` holds every open file; `Aba::grupos` says which side shows it (1 left, 2 right, 3 both, same `Content`). `self.ativa` is always the active tab of the side with the keyboard (`foco`), `outra_ativa` the other side's, so code that uses `self.aba()` needs no change; `FocarGrupo` swaps them. Each side is wrapped in `ao_clicar`, a widget that reports the click before the editor takes it. Closing a tab leaves only its side (`fechar_aba`); `remover_aba` takes it from both; a side left empty joins (`juntar`). Editor ids are `("editor", side)`; focus it with `focar_editor()`.
 
 Messages that arrive on their own (git, diff, check, autosave tick…) are in the list at the top of `update` that does not close the open menu.
 
@@ -93,7 +95,8 @@ cursor destacada; trilho no estilo do VS Code; só a pena no topo.
 - [x] Engrenagem no fim do trilho + Ctrl+, e menu Exibir; padrão da suíte (`feather_ui::configuracoes`). Seções: Aparência, Editor, Terminal, Agentes de IA, Projetos, Atalhos e Sobre. Implementado por pedido direto do usuário em 20/10/2026.
 
 **Editor**
-- [ ] Dois arquivos lado a lado (dividir o editor).
+- [x] Dois arquivos lado a lado (05/11): ◫ na barra de abas, Ctrl+\ ou Exibir ▸ Dividir o editor;
+      dois lados no máximo, divisa arrastável, × à direita junta.
 - [x] Prévia de Markdown (botão Prévia/Editar na barra de abas); HTML abre no navegador (05/11).
 
 **Menus — triagem dos menus do VS Code (19/10). Regra 3: só entra o que funcionar.**

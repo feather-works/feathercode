@@ -85,6 +85,8 @@ struct Aba {
     conflito: bool,
     /// Markdown mostrado formatado em vez do editor.
     previa: bool,
+    /// Em que lado do editor dividido a aba aparece: 1 = esquerda, 2 = direita, 3 = nos dois.
+    grupos: u8,
 }
 
 impl Aba {
@@ -97,6 +99,7 @@ impl Aba {
             conteudo,
             conflito: false,
             previa: false,
+            grupos: 1,
         }
     }
 
@@ -115,9 +118,10 @@ impl Aba {
 
     /// Troca o texto pelo que está no disco e esquece a mudança local.
     fn recarregar(&mut self, texto: &str) {
-        let previa = self.previa;
+        let (previa, grupos) = (self.previa, self.grupos);
         *self = Aba::nova(std::mem::take(&mut self.caminho), texto);
         self.previa = previa;
+        self.grupos = grupos;
     }
 
     fn markdown(&self) -> bool {
@@ -299,7 +303,8 @@ impl pelicano::Widget<Msg> for AoClicar<'_> {
         ev: &Event,
         cx: &mut pelicano::EventCx<Msg>,
     ) -> pelicano::Captured {
-        if let (Event::MousePressed(pelicano::MouseButton::Left), Some(p)) = (ev, cx.cursor) {
+        // Os dois botões: o menu de uma aba do outro lado também precisa do foco antes.
+        if let (Event::MousePressed(_), Some(p)) = (ev, cx.cursor) {
             if n.rect.contains(p) {
                 cx.publish((self.msg)(p));
             }
@@ -517,6 +522,12 @@ enum Msg {
     SalvarSozinho,
     /// Diferença em linha (`true`) ou lado a lado.
     DiffEmLinha(bool),
+    /// Divide o editor (Ctrl+\): o arquivo atual abre também do outro lado.
+    Dividir,
+    /// Volta a um lado só; as abas da direita passam para a esquerda.
+    Juntar,
+    /// O teclado passa para esse lado (0 = esquerda, 1 = direita).
+    FocarGrupo(usize),
     Recortar,
     CopiarSelecao,
     Colar,
@@ -531,6 +542,8 @@ enum Msg {
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Divisa {
     Lado,
+    /// Entre os dois lados do editor dividido.
+    Editor,
     Agente,
     Terminal,
 }
@@ -641,6 +654,13 @@ struct Code {
     /// Faz o push quando o commit em andamento terminar.
     push_depois: bool,
     problemas: Vec<problemas::Problema>,
+    /// Editor dividido em dois lados.
+    dividido: bool,
+    /// Lado com o teclado; `ativa` é a aba dele e `outra_ativa` a do outro lado.
+    foco: usize,
+    outra_ativa: usize,
+    /// Parte da largura que fica com o lado esquerdo.
+    fracao_divisao: f32,
     checando: bool,
     /// O painel de baixo mostra Problemas em vez do terminal.
     vendo_problemas: bool,
@@ -698,6 +718,7 @@ impl pelicano::App for Code {
                 "f" if ctrl => Some(Msg::AbrirBarra(false, false)),
                 "h" if ctrl => Some(Msg::AbrirBarra(false, true)),
                 "g" if ctrl => Some(Msg::AbrirBarra(true, false)),
+                "\\" if ctrl => Some(Msg::Dividir),
                 "o" | "O" if ctrl && shift => Some(Msg::EscolherArquivo),
                 "n" if ctrl => Some(Msg::NovoArquivo),
                 "e" | "E" if ctrl && shift => Some(Msg::Lado(Lado::Explorador)),
@@ -789,6 +810,10 @@ impl Code {
             barra: None,
             push_depois: false,
             problemas: Vec::new(),
+            dividido: false,
+            foco: 0,
+            outra_ativa: 0,
+            fracao_divisao: 0.5,
             checando: false,
             vendo_problemas: false,
         };
@@ -804,6 +829,11 @@ impl Code {
         // Modo de captura: FEATHERCODE_CAPTURAR=foto.png fotografa a janela e fecha;
         // FEATHERCODE_CAPTURAR_ARQUIVO abre um arquivo e FEATHERCODE_CAPTURAR_EXEMPLO=1 põe uma conversa de exemplo.
         if let Some(arquivo) = std::env::var_os("FEATHERCODE_CAPTURAR_ARQUIVO") {
+            let _ = code.update(Msg::AbrirArquivo(code.arvore.raiz.join(arquivo)));
+        }
+        // FEATHERCODE_CAPTURAR_DIVIDIR=<caminho> divide o editor e abre esse arquivo à direita.
+        if let Some(arquivo) = std::env::var_os("FEATHERCODE_CAPTURAR_DIVIDIR") {
+            let _ = code.update(Msg::Dividir);
             let _ = code.update(Msg::AbrirArquivo(code.arvore.raiz.join(arquivo)));
         }
         // FEATHERCODE_CAPTURAR_MENU=1 deixa o menu Exibir aberto na foto.
@@ -1064,6 +1094,9 @@ impl Code {
         self.arvore = arvore::Arvore::nova(p);
         self.abas.clear();
         self.ativa = 0;
+        self.dividido = false;
+        self.foco = 0;
+        self.outra_ativa = 0;
         self.inicio = false;
         self.aviso.clear();
         self.achados = None;
@@ -1078,12 +1111,75 @@ impl Code {
         Task::none()
     }
 
+    /// O bit do lado com o foco em `Aba::grupos`.
+    fn bit(&self) -> u8 {
+        1 << self.foco
+    }
+
+    /// A aba só está no lado com o foco: fechar tira de vez (e pergunta se tem mudança).
+    fn so_aqui(&self, i: usize) -> bool {
+        self.abas[i].grupos & !self.bit() == 0
+    }
+
+    /// Fecha a aba no lado com o foco; se ela não está no outro lado, sai de vez.
     fn fechar_aba(&mut self, i: usize) {
-        self.abas.remove(i);
-        if self.ativa > i {
-            self.ativa -= 1;
+        if self.so_aqui(i) {
+            self.remover_aba(i);
+        } else {
+            self.abas[i].grupos &= !self.bit();
+            self.arrumar_grupos(i);
         }
+    }
+
+    /// Tira a aba dos dois lados.
+    fn remover_aba(&mut self, i: usize) {
+        self.abas.remove(i);
+        for a in [&mut self.ativa, &mut self.outra_ativa] {
+            if *a > i {
+                *a -= 1;
+            }
+        }
+        self.arrumar_grupos(i);
+    }
+
+    /// Depois de fechar perto de `i`: cada lado fica com uma aba ativa dele; lado vazio junta.
+    fn arrumar_grupos(&mut self, i: usize) {
+        let perto = |abas: &[Aba], g: usize, desde: usize| {
+            let lista: Vec<usize> = (0..abas.len()).filter(|&j| abas[j].grupos & (1 << g) != 0).collect();
+            lista.iter().copied().find(|&j| j >= desde).or(lista.last().copied())
+        };
+        let dela = |abas: &[Aba], j: usize, g: usize| abas.get(j).is_some_and(|a| a.grupos & (1 << g) != 0);
+        if self.dividido {
+            let aqui = perto(&self.abas, self.foco, i);
+            let la = perto(&self.abas, 1 - self.foco, self.outra_ativa);
+            if aqui.is_none() || la.is_none() {
+                if aqui.is_none() {
+                    self.ativa = self.outra_ativa;
+                }
+                self.juntar();
+                return;
+            }
+            if !dela(&self.abas, self.outra_ativa, 1 - self.foco) {
+                self.outra_ativa = la.unwrap_or(0);
+            }
+        }
+        if !dela(&self.abas, self.ativa, self.foco) {
+            self.ativa = perto(&self.abas, self.foco, i).unwrap_or(0);
+        }
+    }
+
+    /// Volta a um lado só: as abas dos dois lados ficam todas à esquerda.
+    fn juntar(&mut self) {
+        for a in &mut self.abas {
+            a.grupos = 1;
+        }
+        self.dividido = false;
+        self.foco = 0;
         self.ativa = self.ativa.min(self.abas.len().saturating_sub(1));
+    }
+
+    fn focar_editor(&self) -> Task<Msg> {
+        Task::focus(("editor", self.foco))
     }
 
     /// Exclui de vez (não há lixeira por aqui) e fecha as abas que estavam lá dentro.
@@ -1097,7 +1193,7 @@ impl Code {
             Ok(()) => {
                 for i in (0..self.abas.len()).rev() {
                     if self.abas[i].caminho.starts_with(p) {
-                        self.fechar_aba(i);
+                        self.remover_aba(i);
                     }
                 }
                 let _ = self.update(Msg::AtualizarArvore);
@@ -1304,7 +1400,7 @@ impl Code {
                         Ok(n) if n > 0 => {
                             aba.conteudo.go_to_line(n);
                             self.barra = None;
-                            return Task::focus("editor");
+                            return self.focar_editor();
                         }
                         _ => b.nada = true,
                     }
@@ -1319,7 +1415,7 @@ impl Code {
             }
             Msg::FecharBarra => {
                 self.barra = None;
-                return Task::focus("editor");
+                return self.focar_editor();
             }
             Msg::VerConflito => {
                 if let Some(aba) = self.aba() {
@@ -1415,14 +1511,14 @@ impl Code {
                 if matches!(msg, Msg::Recortar) {
                     aba.conteudo.insert("");
                 }
-                return Task::batch([Task::write_clipboard(sel), Task::focus("editor")]);
+                return Task::batch([Task::write_clipboard(sel), self.focar_editor()]);
             }
             Msg::Colar => return Task::read_clipboard(Msg::Colado),
             Msg::Colado(texto) => {
                 if let (Some(aba), Some(t)) = (self.abas.get(self.ativa), texto) {
                     aba.conteudo.insert(&t);
                 }
-                return Task::focus("editor");
+                return self.focar_editor();
             }
             Msg::RodarSelecao => {
                 let Some(sel) = self.aba().and_then(|a| a.conteudo.selection()) else {
@@ -1471,6 +1567,12 @@ impl Code {
                 match self.arrastando {
                     Some(Divisa::Lado) => {
                         self.largura_lado = Some((p.x - paineis::LARGURA_TRILHO).min(w / 2.0).max(160.0))
+                    }
+                    Some(Divisa::Editor) => {
+                        let x0 = paineis::LARGURA_TRILHO
+                            + if self.lado.is_some() { self.largura_lado() + VAO } else { 0.0 };
+                        let w = self.largura_editor().max(1.0);
+                        self.fracao_divisao = ((p.x - x0) / w).clamp(0.2, 0.8);
                     }
                     Some(Divisa::Agente) => {
                         self.largura_agente = (w - p.x - VAO).min(w / 2.0).max(280.0)
@@ -1574,7 +1676,7 @@ impl Code {
                 if let Some(aba) = self.abas.get(self.ativa) {
                     aba.conteudo.go_to_line(linha + 1);
                 }
-                return Task::batch([abrir, Task::focus("editor")]);
+                return Task::batch([abrir, self.focar_editor()]);
             }
             Msg::GitAtualizar => {
                 return Task::perform(paineis::status_git(self.arvore.raiz.clone()), Msg::Git)
@@ -1784,12 +1886,15 @@ impl Code {
             Msg::AbrirArquivo(p) => {
                 self.diff = None;
                 if let Some(i) = self.abas.iter().position(|a| a.caminho == p) {
+                    self.abas[i].grupos |= self.bit();
                     self.ativa = i;
                 } else {
                     match std::fs::read_to_string(&p) {
                         Ok(t) => {
                             self.config.usar_arquivo(p.clone());
-                            self.abas.push(Aba::nova(p, &t));
+                            let mut aba = Aba::nova(p, &t);
+                            aba.grupos = self.bit();
+                            self.abas.push(aba);
                             self.ativa = self.abas.len() - 1;
                             self.aviso.clear();
                         }
@@ -1807,14 +1912,16 @@ impl Code {
                 self.diff = None;
             }
             Msg::FecharAba(i) if i >= self.abas.len() => {}
-            Msg::FecharAba(i) if self.abas[i].sujo() => self.confirmar = Some(Confirmar::FecharAba(i)),
+            Msg::FecharAba(i) if self.abas[i].sujo() && self.so_aqui(i) => {
+                self.confirmar = Some(Confirmar::FecharAba(i))
+            }
             Msg::FecharAba(i) => self.fechar_aba(i),
             Msg::FecharAbas(mut lista) => {
                 lista.sort_unstable();
                 lista.retain(|&i| i < self.abas.len());
                 let mut ficaram = 0;
                 for i in lista.into_iter().rev() {
-                    if self.abas[i].sujo() {
+                    if self.abas[i].sujo() && self.so_aqui(i) {
                         ficaram += 1;
                     } else {
                         self.fechar_aba(i);
@@ -1836,6 +1943,30 @@ impl Code {
                 let erros = self.salvar_abas(true);
                 if !erros.is_empty() {
                     self.aviso = format!("Não deu para salvar: {}", erros.join("; "));
+                }
+            }
+            Msg::Dividir => {
+                if self.abas.get(self.ativa).is_none() {
+                    return Task::none();
+                }
+                // Já dividido: o arquivo vai também para o outro lado. O foco vai junto.
+                let outro = if self.dividido { 1 - self.foco } else { 1 };
+                self.abas[self.ativa].grupos |= 1 << outro;
+                self.dividido = true;
+                self.outra_ativa = self.ativa;
+                self.foco = outro;
+                self.diff = None;
+                return self.focar_editor();
+            }
+            Msg::Juntar => {
+                self.juntar();
+                return self.focar_editor();
+            }
+            Msg::FocarGrupo(g) => {
+                if self.dividido && g < 2 && g != self.foco {
+                    std::mem::swap(&mut self.ativa, &mut self.outra_ativa);
+                    self.foco = g;
+                    self.diff = None;
                 }
             }
             Msg::DiffEmLinha(sim) => {
@@ -2301,20 +2432,26 @@ impl Code {
 
     fn area_de_trabalho<'a>(&'a self, barra: Element<'a, Msg>) -> Element<'a, Msg> {
         // Cada painel é um cartão de cantos arredondados; o fundo da janela aparece nos vãos.
-        let editor = cartao(
-            column![
-                self.abas_view(),
-                self.conflito_view(),
-                self.barra_view(),
-                match &self.diff {
-                    Some(d) => self.diff_view(d),
-                    None => self.editor_view(),
-                }
+        let editor: Element<Msg> = if self.dividido {
+            // Cada lado é um cartão; o clique em qualquer ponto de um lado leva o teclado para ele.
+            let lado = |g: usize, parte: f32| {
+                container(ao_clicar(
+                    cartao(self.grupo_view(g), COR_PAINEL(), Length::FILL),
+                    move |_| Msg::FocarGrupo(g),
+                ))
+                .width(Length::Fill((parte * 1000.0).max(1.0) as u16))
+                .height(Length::FILL)
+            };
+            row![
+                lado(0, self.fracao_divisao),
+                alca(Divisa::Editor),
+                lado(1, 1.0 - self.fracao_divisao)
             ]
-            .height(Length::FILL),
-            COR_PAINEL(),
-            Length::FILL,
-        );
+            .height(Length::FILL)
+            .into()
+        } else {
+            cartao(self.grupo_view(0), COR_PAINEL(), Length::FILL)
+        };
         // Os vãos entre os cartões são as alças de arrastar.
         let mut centro = column![editor]
             .width(Length::FILL)
@@ -2517,9 +2654,35 @@ impl Code {
         .into()
     }
 
-    fn abas_view(&self) -> Element<'_, Msg> {
-        let abas = self.abas.iter().enumerate().map(|(i, a)| {
-            let ativa = i == self.ativa;
+    /// A aba ativa do lado `g` (o com foco usa `ativa`; o outro, `outra_ativa`).
+    fn ativa_do(&self, g: usize) -> usize {
+        if g == self.foco {
+            self.ativa
+        } else {
+            self.outra_ativa
+        }
+    }
+
+    /// Um lado do editor: abas, faixas (só no lado com foco) e o editor ou a diferença.
+    fn grupo_view(&self, g: usize) -> Element<'_, Msg> {
+        let foco = g == self.foco;
+        let mut c = column![self.abas_view(g)].height(Length::FILL);
+        if foco {
+            c = c.push(self.conflito_view()).push(self.barra_view());
+        }
+        c.push(match &self.diff {
+            Some(d) if foco => self.diff_view(d),
+            _ => self.editor_view(g),
+        })
+        .into()
+    }
+
+    fn abas_view(&self, g: usize) -> Element<'_, Msg> {
+        let ativa_aqui = self.ativa_do(g);
+        // Com o editor dividido, só o lado com o teclado tem o traço.
+        let traco = g == self.foco;
+        let abas = self.abas.iter().enumerate().filter(|(_, a)| a.grupos & (1 << g) != 0).map(|(i, a)| {
+            let ativa = i == ativa_aqui;
             let nome = a
                 .caminho
                 .file_name()
@@ -2548,7 +2711,7 @@ impl Code {
             .height(Length::FILL)
             .style(move |_, s| aba_estilo(ativa, s));
             // O traço embaixo marca a aba ativa.
-            let aba: Element<Msg> = if ativa {
+            let aba: Element<Msg> = if ativa && traco {
                 Element::new(Sublinhado {
                     filho: aba.into(),
                     cor: COR_AZUL_ACENTO(),
@@ -2561,13 +2724,30 @@ impl Code {
             .into()
         });
         let arquivo = self.aba().map(|a| a.caminho.as_path());
-        let rodar: Element<Msg> =
-            if let Some(cmd) = execucao::comando_do_projeto(&self.arvore.raiz, arquivo) {
+        let rodar: Element<Msg> = match execucao::comando_do_projeto(&self.arvore.raiz, arquivo) {
+            Some(cmd) if g == 0 => {
                 botao_rodar("Rodar", VERDE, Msg::RodarProjeto, format!("{cmd}  (F5)"))
-            } else {
-                Space::new(0.0, 0.0).into()
-            };
-        let extra: Element<Msg> = match self.aba() {
+            }
+            _ => Space::new(0.0, 0.0).into(),
+        };
+        let dividir: Element<Msg> = match (self.dividido, g) {
+            (false, _) if !self.abas.is_empty() => tooltip(
+                botao_icone("columns", Msg::Dividir),
+                "Dividir o editor (Ctrl+\\)",
+                TooltipPosition::Bottom,
+            )
+            .style(tema::estilo_dica)
+            .into(),
+            (true, 1) => tooltip(
+                botao_icone("x", Msg::Juntar),
+                "Juntar os dois lados",
+                TooltipPosition::Bottom,
+            )
+            .style(tema::estilo_dica)
+            .into(),
+            _ => Space::new(0.0, 0.0).into(),
+        };
+        let extra: Element<Msg> = match self.abas.get(ativa_aqui) {
             Some(a) if a.markdown() => botao_texto(
                 row![
                     icone_traco(if a.previa { "code" } else { "eye" }, 14.0),
@@ -2592,6 +2772,7 @@ impl Code {
                 row(abas).height(Length::FILL),
                 horizontal_space(),
                 extra,
+                dividir,
                 container(rodar).padding([0, 10])
             ]
             .height(Length::FILL)
@@ -2602,8 +2783,8 @@ impl Code {
         .into()
     }
 
-    fn editor_view(&self) -> Element<'_, Msg> {
-        let Some(aba) = self.aba() else {
+    fn editor_view(&self, g: usize) -> Element<'_, Msg> {
+        let Some(aba) = self.abas.get(self.ativa_do(g)) else {
             let vazio = column![
                 text("Nenhum arquivo aberto").size(15).font(NEGRITO),
                 text("Escolha um arquivo na árvore, ou peça ao Claude Code no painel da direita.")
@@ -2644,7 +2825,7 @@ impl Code {
         let barra_aberta = self.barra.is_some();
         // O editor do pelicano rola, numera as linhas e desfaz sozinho; o app só cuida dos atalhos.
         let mut editor = text_editor(&aba.conteudo)
-            .id("editor")
+            .id(("editor", g))
             // O chat também é um editor: sem clique, nenhum dos dois pega a digitação.
             .idle_focus(false)
             .on_key(move |k, m| {
@@ -2658,6 +2839,7 @@ impl Code {
                         "f" => Some(Msg::AbrirBarra(false, false)),
                         "h" => Some(Msg::AbrirBarra(false, true)),
                         "g" => Some(Msg::AbrirBarra(true, false)),
+                        "\\" => Some(Msg::Dividir),
                         _ => None,
                     },
                     Key::Named(NamedKey::Escape) if barra_aberta => Some(Msg::FecharBarra),
@@ -2978,7 +3160,7 @@ impl Code {
     fn largura_editor(&self) -> f32 {
         let mut w = self.tamanho.width - paineis::LARGURA_TRILHO - VAO;
         if self.lado.is_some() {
-            w -= self.largura_lado.unwrap_or(LARGURA_ARVORE) + VAO;
+            w -= self.largura_lado() + VAO;
         }
         if self.agente_aberto {
             w -= self.largura_agente + VAO;
@@ -3980,6 +4162,7 @@ fn botao_rodar<'a>(rotulo: &'a str, cor: Color, msg: Msg, dica: String) -> Eleme
 }
 
 fn cursor_da_divisa(d: Divisa) -> CursorIcon {
+    // Divisa::Editor fica na vertical, como Lado e Agente: arrasta na horizontal.
     if d == Divisa::Terminal {
         CursorIcon::RowResize
     } else {
@@ -4269,6 +4452,42 @@ mod testes {
             Ok(Some(pasta.join("sub/c.rs")))
         );
         std::fs::remove_dir_all(&pasta).unwrap();
+    }
+
+    #[test]
+    fn dividir_fechar_de_um_lado_e_juntar() {
+        use super::*;
+        let (mut code, _) = Code::novo(config::Config::ler());
+        let raiz = code.arvore.raiz.clone();
+        for n in ["a.rs", "b.rs"] {
+            code.abas.push(Aba::nova(raiz.join(n), ""));
+        }
+        code.ativa = 1;
+        let _ = code.update(Msg::Dividir);
+        // b.rs nos dois lados, o teclado à direita.
+        assert!(code.dividido && code.foco == 1);
+        assert_eq!((code.abas[0].grupos, code.abas[1].grupos), (1, 3));
+        // Fechar à direita não fecha à esquerda; lado vazio junta.
+        let _ = code.update(Msg::FecharAba(1));
+        assert_eq!(code.abas.len(), 2);
+        assert!(!code.dividido && code.foco == 0);
+        assert_eq!(code.ativa, 1);
+        // Aba suja que está só num lado pergunta; nos dois lados, só sai daquele.
+        let _ = code.update(Msg::Dividir);
+        code.abas[1].conteudo.insert("x");
+        let _ = code.update(Msg::FocarGrupo(0));
+        assert_eq!((code.foco, code.ativa, code.outra_ativa), (0, 1, 1));
+        let _ = code.update(Msg::FecharAba(1));
+        assert!(code.confirmar.is_none());
+        assert_eq!(code.abas[1].grupos, 2);
+        assert_eq!(code.ativa, 0);
+        let _ = code.update(Msg::FocarGrupo(1));
+        let _ = code.update(Msg::FecharAba(1));
+        assert_eq!(code.confirmar, Some(Confirmar::FecharAba(1)));
+        code.confirmar = None;
+        let _ = code.update(Msg::Juntar);
+        assert!(code.abas.iter().all(|a| a.grupos == 1));
+        assert_eq!(code.ativa, 1);
     }
 
     #[test]

@@ -986,6 +986,11 @@ impl Code {
                             Msg::AlternarAgente,
                             self.agente_aberto,
                         ),
+                        if self.dividido {
+                            ("Juntar o editor", "", Msg::Juntar, false)
+                        } else {
+                            ("Dividir o editor", "Ctrl+\\", Msg::Dividir, false)
+                        },
                     ]
                 };
                 if !self.inicio {
@@ -1174,7 +1179,10 @@ impl Code {
 
     fn itens_aba(&self, i: usize) -> Option<Vec<Item>> {
         let aba = self.abas.get(i)?;
-        let todas: Vec<usize> = (0..self.abas.len()).collect();
+        // Só as abas do lado com o foco (o clique no outro lado já trouxe o foco para cá).
+        let todas: Vec<usize> = (0..self.abas.len())
+            .filter(|&j| self.abas[j].grupos & self.bit() != 0)
+            .collect();
         let outras: Vec<usize> = todas.iter().copied().filter(|&j| j != i).collect();
         Some(vec![
             ("Fechar", "", Msg::FecharAba(i), false),
