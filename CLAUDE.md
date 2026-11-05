@@ -40,6 +40,8 @@ Split editor: `self.abas` holds every open file; `Aba::grupos` says which side s
 
 Editor typing: Enter goes through `on_key` to `Msg::NovaLinha`, which keeps the line's indentation and adds a level after `{ ( [ :` (`edicao::quebra_com_recuo`). `edicao::detectar_recuo` reads the first 400 lines to tell tabs from 2/4/8 spaces; Tab inserts that unit and the status bar shows it (click toggles `config.mostrar_invisiveis`). Find/replace and go-to-line are a floating box at the editor's top right (`barra_view`, stacked over the editor). Saving (Ctrl+S, Save all) runs `cargo check` for the Problems tab. With the terminal closed, the bottom edge stays draggable and opens it after 40 px.
 
+Autocomplete (`completar.rs`, branch `autocompletar` until pelicano 0.1.31 is on crates.io): after each edit (`on_change` → `Msg::Editou`) the name being typed is matched against the file's own words (most used first) and the language keywords, case-sensitive, so accepting only appends the rest. pelicano draws the list at the caret (`TextEditor::completions`); Tab or Enter accepts, arrows move, Esc closes, and it hides once the cursor moves away from where it was asked.
+
 Messages that arrive on their own (git, diff, check, autosave tick…) are in the list at the top of `update` that does not close the open menu.
 
 Editor safety, all in `main.rs`:

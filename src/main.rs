@@ -3,6 +3,7 @@
 mod adaptadores;
 mod agente;
 mod arvore;
+mod completar;
 mod config;
 mod edicao;
 mod execucao;
@@ -514,6 +515,11 @@ enum Msg {
     Preparado(Result<(), String>),
     /// Enter no editor: quebra a linha mantendo o recuo.
     NovaLinha,
+    /// O texto do editor mudou: recalcula as sugestões do autocompletar.
+    Editou,
+    AceitarSugestao,
+    MoverSugestao(isize),
+    FecharSugestoes,
     /// Mostra pontos nos espaços e setas nos tabs.
     AlternarInvisiveis,
     /// Roda o `cargo check` e enche a lista de Problemas.
@@ -658,6 +664,10 @@ struct Code {
     /// Faz o push quando o commit em andamento terminar.
     push_depois: bool,
     problemas: Vec<problemas::Problema>,
+    /// Autocompletar: as palavras, a escolhida e onde foram pedidas (aba, linha, coluna).
+    sugestoes: Vec<String>,
+    sugestao_sel: usize,
+    sugestao_em: (usize, usize, usize),
     /// Editor dividido em dois lados.
     dividido: bool,
     /// Lado com o teclado; `ativa` é a aba dele e `outra_ativa` a do outro lado.
@@ -814,6 +824,9 @@ impl Code {
             barra: None,
             push_depois: false,
             problemas: Vec::new(),
+            sugestoes: Vec::new(),
+            sugestao_sel: 0,
+            sugestao_em: (0, 0, 0),
             dividido: false,
             foco: 0,
             outra_ativa: 0,
@@ -1641,6 +1654,36 @@ impl Code {
                 let linha = c.line(l).unwrap_or_default();
                 c.insert(&edicao::quebra_com_recuo(&linha, col, edicao::detectar_recuo(c)));
             }
+            Msg::Editou => {
+                let Some(aba) = self.abas.get(self.ativa) else {
+                    return Task::none();
+                };
+                let (l, col) = aba.conteudo.cursor();
+                let linha = aba.conteudo.line(l).unwrap_or_default();
+                let prefixo = completar::prefixo(&linha, col);
+                self.sugestoes = completar::sugestoes(&aba.conteudo, &aba.caminho, &prefixo);
+                self.sugestao_sel = 0;
+                self.sugestao_em = (self.ativa, l, col);
+            }
+            Msg::AceitarSugestao => {
+                let escolhida = self.sugestoes.get(self.sugestao_sel).cloned();
+                self.sugestoes.clear();
+                if let (Some(palavra), Some(aba)) = (escolhida, self.abas.get(self.ativa)) {
+                    let (l, col) = aba.conteudo.cursor();
+                    let linha = aba.conteudo.line(l).unwrap_or_default();
+                    let prefixo = completar::prefixo(&linha, col);
+                    if let Some(resto) = palavra.strip_prefix(prefixo.as_str()) {
+                        aba.conteudo.insert(resto);
+                    }
+                }
+            }
+            Msg::MoverSugestao(passo) => {
+                let n = self.sugestoes.len() as isize;
+                if n > 0 {
+                    self.sugestao_sel = (self.sugestao_sel as isize + passo).rem_euclid(n) as usize;
+                }
+            }
+            Msg::FecharSugestoes => self.sugestoes.clear(),
             Msg::AlternarInvisiveis => {
                 self.config.mostrar_invisiveis = !self.config.mostrar_invisiveis;
                 self.config.gravar();
@@ -2864,14 +2907,26 @@ impl Code {
             .and_then(|e| e.to_str())
             .unwrap_or("txt");
         let barra_aberta = self.barra.is_some();
+        // A lista só vale onde foi pedida: o cursor andou (clique, seta), ela some.
+        let (l, col) = aba.conteudo.cursor();
+        let sugerindo = g == self.foco
+            && !self.sugestoes.is_empty()
+            && self.sugestao_em == (self.ativa, l, col);
         // O editor do pelicano rola, numera as linhas e desfaz sozinho; o app só cuida dos atalhos.
         let mut editor = text_editor(&aba.conteudo)
             .id(("editor", g))
+            .on_change(Msg::Editou)
             // O chat também é um editor: sem clique, nenhum dos dois pega a digitação.
             .idle_focus(false)
             .on_key(move |k, m| {
                 let ctrl = m.control_key() || m.super_key();
                 match k {
+                    Key::Named(NamedKey::Tab | NamedKey::Enter) if sugerindo && !ctrl => {
+                        Some(Msg::AceitarSugestao)
+                    }
+                    Key::Named(NamedKey::ArrowDown) if sugerindo => Some(Msg::MoverSugestao(1)),
+                    Key::Named(NamedKey::ArrowUp) if sugerindo => Some(Msg::MoverSugestao(-1)),
+                    Key::Named(NamedKey::Escape) if sugerindo => Some(Msg::FecharSugestoes),
                     Key::Named(NamedKey::Tab) if !ctrl => Some(Msg::Recuar(!m.shift_key())),
                     Key::Character(c) if ctrl && matches!(c.as_str(), ";" | "/") => {
                         Some(Msg::Comentar)
@@ -2909,6 +2964,9 @@ impl Code {
         }
         if self.config.mostrar_invisiveis {
             editor = editor.invisibles(true);
+        }
+        if sugerindo {
+            editor = editor.completions(self.sugestoes.clone(), self.sugestao_sel);
         }
         let avisos: Vec<pelicano::Warning> = self
             .problemas
