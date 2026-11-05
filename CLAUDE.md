@@ -38,6 +38,8 @@ Diff: side by side by default (`paineis::lado_a_lado` pairs removed and added li
 
 Split editor: `self.abas` holds every open file; `Aba::grupos` says which side shows it (1 left, 2 right, 3 both, same `Content`). `self.ativa` is always the active tab of the side with the keyboard (`foco`), `outra_ativa` the other side's, so code that uses `self.aba()` needs no change; `FocarGrupo` swaps them. Each side is wrapped in `ao_clicar`, a widget that reports the click before the editor takes it. Closing a tab leaves only its side (`fechar_aba`); `remover_aba` takes it from both; a side left empty joins (`juntar`). Editor ids are `("editor", side)`; focus it with `focar_editor()`.
 
+Editor typing: Enter goes through `on_key` to `Msg::NovaLinha`, which keeps the line's indentation and adds a level after `{ ( [ :` (`edicao::quebra_com_recuo`). `edicao::detectar_recuo` reads the first 400 lines to tell tabs from 2/4/8 spaces; Tab inserts that unit and the status bar shows it (click toggles `config.mostrar_invisiveis`). Find/replace and go-to-line are a floating box at the editor's top right (`barra_view`, stacked over the editor). Saving (Ctrl+S, Save all) runs `cargo check` for the Problems tab. With the terminal closed, the bottom edge stays draggable and opens it after 40 px.
+
 Messages that arrive on their own (git, diff, check, autosave tick…) are in the list at the top of `update` that does not close the open menu.
 
 Editor safety, all in `main.rs`:

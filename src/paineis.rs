@@ -995,6 +995,12 @@ impl Code {
                 };
                 if !self.inicio {
                     v.push((
+                        "Mostrar espaços e tabs",
+                        "",
+                        Msg::AlternarInvisiveis,
+                        self.config.mostrar_invisiveis,
+                    ));
+                    v.push((
                         "Linhas alternadas no editor",
                         "",
                         Msg::AlternarLinhas,

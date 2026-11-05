@@ -46,6 +46,8 @@ pub struct Config {
     pub salvar_sozinho: bool,
     /// Diferença em linha (+/−) em vez de lado a lado.
     pub diff_em_linha: bool,
+    /// Pontos nos espaços e setas nos tabs do editor.
+    pub mostrar_invisiveis: bool,
 }
 
 fn caminho() -> Option<PathBuf> {
@@ -97,6 +99,7 @@ impl Config {
             linhas_alternadas: v["linhas_alternadas"].as_bool().unwrap_or(false),
             salvar_sozinho: v["salvar_sozinho"].as_bool().unwrap_or(false),
             diff_em_linha: v["diff_em_linha"].as_bool().unwrap_or(false),
+            mostrar_invisiveis: v["mostrar_invisiveis"].as_bool().unwrap_or(false),
         }
     }
 
@@ -127,6 +130,7 @@ impl Config {
             "linhas_alternadas": self.linhas_alternadas,
             "salvar_sozinho": self.salvar_sozinho,
             "diff_em_linha": self.diff_em_linha,
+            "mostrar_invisiveis": self.mostrar_invisiveis,
         });
         // Preferência perdida não é dado do usuário: falha ao gravar só é ignorada.
         let _ = std::fs::create_dir_all(c.parent().expect("config tem pasta"));

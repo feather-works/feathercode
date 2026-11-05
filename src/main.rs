@@ -512,6 +512,10 @@ enum Msg {
     /// Prepara (`true`) ou tira da preparação um arquivo, ou todos (`None`).
     Preparar(Option<PathBuf>, bool),
     Preparado(Result<(), String>),
+    /// Enter no editor: quebra a linha mantendo o recuo.
+    NovaLinha,
+    /// Mostra pontos nos espaços e setas nos tabs.
+    AlternarInvisiveis,
     /// Roda o `cargo check` e enche a lista de Problemas.
     Checar,
     Checado(PathBuf, Result<Vec<problemas::Problema>, String>),
@@ -1578,8 +1582,17 @@ impl Code {
                         self.largura_agente = (w - p.x - VAO).min(w / 2.0).max(280.0)
                     }
                     Some(Divisa::Terminal) => {
-                        self.altura_terminal =
-                            (h - ALTURA_STATUS - VAO - p.y).min(h - 260.0).max(80.0)
+                        let puxado = h - ALTURA_STATUS - VAO - p.y;
+                        // Fechado, só abre depois de puxar um pouco: um clique na beirada não abre.
+                        if !self.terminal_aberto && puxado > 40.0 {
+                            self.terminal_aberto = true;
+                            if self.terminais.ativo().is_none() {
+                                if let Err(e) = self.terminais.novo(&self.arvore.raiz, None) {
+                                    self.aviso = e;
+                                }
+                            }
+                        }
+                        self.altura_terminal = puxado.min(h - 260.0).max(80.0)
                     }
                     None => {}
                 }
@@ -1614,10 +1627,23 @@ impl Code {
                 };
                 // Tab sem seleção só põe espaços no cursor, como em qualquer editor.
                 if mais && aba.conteudo.selection().is_none() {
-                    aba.conteudo.insert("    ");
+                    aba.conteudo.insert(&edicao::detectar_recuo(&aba.conteudo).unidade());
                 } else {
                     edicao::recuar(&aba.conteudo, mais);
                 }
+            }
+            Msg::NovaLinha => {
+                let Some(aba) = self.abas.get(self.ativa) else {
+                    return Task::none();
+                };
+                let c = &aba.conteudo;
+                let (l, col) = c.cursor();
+                let linha = c.line(l).unwrap_or_default();
+                c.insert(&edicao::quebra_com_recuo(&linha, col, edicao::detectar_recuo(c)));
+            }
+            Msg::AlternarInvisiveis => {
+                self.config.mostrar_invisiveis = !self.config.mostrar_invisiveis;
+                self.config.gravar();
             }
             Msg::Comentar => {
                 let Some(aba) = self.abas.get(self.ativa) else {
@@ -1933,11 +1959,11 @@ impl Code {
             }
             Msg::SalvarTudo => {
                 let erros = self.salvar_abas(false);
-                self.aviso = if erros.is_empty() {
-                    String::new()
-                } else {
-                    format!("Não deu para salvar: {}", erros.join("; "))
-                };
+                if erros.is_empty() {
+                    self.aviso.clear();
+                    return self.update(Msg::Checar);
+                }
+                self.aviso = format!("Não deu para salvar: {}", erros.join("; "));
             }
             Msg::SalvarSozinho => {
                 let erros = self.salvar_abas(true);
@@ -1980,7 +2006,11 @@ impl Code {
             Msg::Salvar => {
                 if let Some(aba) = self.abas.get_mut(self.ativa) {
                     match aba.salvar() {
-                        Ok(()) => self.aviso.clear(),
+                        Ok(()) => {
+                            self.aviso.clear();
+                            // Os erros aparecem sem rodar o projeto: o check só confere, não gera o programa.
+                            return self.update(Msg::Checar);
+                        }
                         Err(e) => self.aviso = format!("Não deu para salvar: {e}"),
                     }
                 }
@@ -2460,6 +2490,9 @@ impl Code {
             centro = centro
                 .push(alca(Divisa::Terminal))
                 .push(cartao(self.terminal_view(), cor_terminal(), Length::Shrink));
+        } else {
+            // Fechado, a beirada de baixo continua arrastável: puxar para cima abre o terminal.
+            centro = centro.push(alca(Divisa::Terminal));
         }
         let mut cartoes = row![].height(Length::FILL);
         if let Some(lado) = self.lado_view() {
@@ -2668,13 +2701,21 @@ impl Code {
         let foco = g == self.foco;
         let mut c = column![self.abas_view(g)].height(Length::FILL);
         if foco {
-            c = c.push(self.conflito_view()).push(self.barra_view());
+            c = c.push(self.conflito_view());
         }
-        c.push(match &self.diff {
+        let corpo = match &self.diff {
             Some(d) if foco => self.diff_view(d),
             _ => self.editor_view(g),
-        })
-        .into()
+        };
+        // A caixinha de localizar flutua por cima do editor, sem empurrar o texto.
+        let corpo: Element<Msg> = match self.barra_view().filter(|_| foco && self.diff.is_none()) {
+            Some(caixa) => stack![corpo, caixa]
+                .width(Length::FILL)
+                .height(Length::FILL)
+                .into(),
+            None => corpo,
+        };
+        c.push(corpo).into()
     }
 
     fn abas_view(&self, g: usize) -> Element<'_, Msg> {
@@ -2843,6 +2884,7 @@ impl Code {
                         _ => None,
                     },
                     Key::Named(NamedKey::Escape) if barra_aberta => Some(Msg::FecharBarra),
+                    Key::Named(NamedKey::Enter) if !ctrl && !m.alt_key() => Some(Msg::NovaLinha),
                     _ => None,
                 }
             })
@@ -2864,6 +2906,9 @@ impl Code {
             .style(|_, _| Style::default().background(COR_PAINEL()).text_color(COR_TEXTO()));
         if self.config.linhas_alternadas {
             editor = editor.stripes(COR_TEXTO().alpha(ALFA_LISTRAS));
+        }
+        if self.config.mostrar_invisiveis {
+            editor = editor.invisibles(true);
         }
         let avisos: Vec<pelicano::Warning> = self
             .problemas
@@ -2909,105 +2954,125 @@ impl Code {
         .into()
     }
 
-    /// Localizar/substituir (Ctrl+F, Ctrl+H) ou ir para a linha (Ctrl+G), acima do editor.
-    fn barra_view(&self) -> Element<'_, Msg> {
+    /// Caixinha flutuante no canto do editor: localizar/substituir (Ctrl+F, Ctrl+H) ou ir para
+    /// a linha (Ctrl+G), como no VS Code.
+    fn barra_view(&self) -> Option<Element<'_, Msg>> {
         let (Some(b), Some(aba)) = (&self.barra, self.aba()) else {
-            return Space::new(0.0, 0.0).into();
+            return None;
         };
         let estilo = campo(if b.nada {
             mistura_cor(COR_PAINEL(), COR_ERRO(), 0.25)
         } else {
             COR_PAINEL()
         });
-        let fechar = tooltip(
-            botao_icone("x", Msg::FecharBarra),
-            "Fechar (Esc)",
-            TooltipPosition::Bottom,
-        )
-        .style(tema::estilo_dica);
-        let linha: Element<Msg> = if b.linha {
+        let dica = com_dica;
+        let fechar = dica(botao_icone("x", Msg::FecharBarra), "Fechar (Esc)");
+        let corpo: Element<Msg> = if b.linha {
             row![
-                text(format!("Ir para a linha (1 a {}):", aba.conteudo.line_count())).size(12),
-                text_input("número", b.termo.as_str())
-                    .id("barra")
-                    .on_input(Msg::TermoBarra)
-                    .on_submit(Msg::Proxima)
-                    .size(12)
-                    .padding([4, 8])
-                    .width(120.0)
-                    .style(estilo),
-                horizontal_space(),
+                text_input("Ir para a linha", b.termo.as_str())
+                .id("barra")
+                .on_input(Msg::TermoBarra)
+                .on_submit(Msg::Proxima)
+                .size(12)
+                .padding([4, 8])
+                .width(160.0)
+                .style(estilo),
+                text(format!("1 a {}", aba.conteudo.line_count()))
+                    .size(11)
+                    .color(COR_TEXTO_MUTED()),
                 fechar,
             ]
-            .spacing(8)
+            .spacing(6)
             .align(Align::Center)
             .into()
         } else {
             let achados = contar(&aba.conteudo.text(), &b.termo, b.maiusculas);
-            let mut col = column![row![
+            let contagem = match achados {
+                0 if b.termo.is_empty() => String::new(),
+                0 => "nenhum".into(),
+                n => n.to_string(),
+            };
+            let abrir_troca = dica(
+                botao_icone(
+                    if b.substituir { "chevron-down" } else { "chevron-right" },
+                    Msg::AbrirBarra(false, !b.substituir),
+                ),
+                "Substituir (Ctrl+H)",
+            );
+            let maiusculas = dica(
+                button(text("Aa").size(12).font(NEGRITO).color(if b.maiusculas {
+                    COR_AZUL_ACENTO()
+                } else {
+                    COR_TEXTO_MUTED()
+                }))
+                .on_press(Msg::Maiusculas)
+                .padding([2, 5])
+                .style(move |_, s| item_lista(b.maiusculas, s, 4.0))
+                .into(),
+                "Diferenciar maiúsculas",
+            );
+            let mut linhas = column![row![
+                abrir_troca,
                 text_input("Localizar", b.termo.as_str())
                     .id("barra")
                     .on_input(Msg::TermoBarra)
                     .on_submit(Msg::Proxima)
                     .size(12)
                     .padding([4, 8])
-                    .width(260.0)
+                    .width(200.0)
                     .style(estilo),
-                tooltip(
-                    botao_texto(
-                        text("Aa").size(12).font(NEGRITO).color(if b.maiusculas {
-                            COR_AZUL_ACENTO()
-                        } else {
-                            COR_TEXTO_MUTED()
-                        }),
-                        Msg::Maiusculas
-                    ),
-                    "Diferenciar maiúsculas",
-                    TooltipPosition::Bottom
-                )
-                .style(tema::estilo_dica),
-                text(match achados {
-                    0 if b.termo.is_empty() => String::new(),
-                    0 => "nenhum".into(),
-                    1 => "1 achado".into(),
-                    n => format!("{n} achados"),
-                })
-                .size(12)
-                .color(COR_TEXTO_MUTED()),
-                botao_texto(text("Próximo (Enter)").size(12), Msg::Proxima),
-                horizontal_space(),
+                maiusculas,
+                container(text(contagem).size(11).color(COR_TEXTO_MUTED()))
+                    .width(46.0)
+                    .align_x(Align::Center),
+                dica(botao_icone("arrow-down", Msg::Proxima), "Próximo (Enter)"),
                 fechar,
             ]
-            .spacing(8)
+            .spacing(4)
             .align(Align::Center)]
-            .spacing(6);
+            .spacing(4);
             if b.substituir {
-                col = col.push(
+                linhas = linhas.push(
                     row![
+                        Space::new(24.0, 0.0),
                         text_input("Substituir por", b.novo.as_str())
                             .on_input(Msg::NovoBarra)
                             .on_submit(Msg::TrocarUma)
                             .size(12)
                             .padding([4, 8])
-                            .width(260.0)
+                            .width(200.0)
                             .style(campo(COR_PAINEL())),
-                        botao_texto(text("Substituir").size(12), Msg::TrocarUma),
-                        botao_texto(text("Substituir todos").size(12), Msg::TrocarTodas),
+                        dica(botao_icone("arrow-forward-up", Msg::TrocarUma), "Substituir (Enter)"),
+                        dica(botao_icone("checks", Msg::TrocarTodas), "Substituir todos"),
                     ]
-                    .spacing(8)
+                    .spacing(4)
                     .align(Align::Center),
                 );
             }
-            col.into()
+            linhas.into()
         };
-        column![
-            container(linha)
-                .padding([6, 12])
+        let caixa = container(corpo).padding([6, 8]).style(|_| {
+            fundo(COR_CROMO_2())
+                .border(Border::rounded(8.0).color(COR_BORDA(), 1.0))
+                .shadow(Shadow {
+                    color: Color::rgba(0.0, 0.0, 0.0, 0.3),
+                    offset: Point::new(0.0, 6.0),
+                    blur: 18.0,
+                })
+        });
+        // Canto de cima à direita, longe da barra de rolagem.
+        Some(
+            container(caixa)
                 .width(Length::FILL)
-                .style(|_| fundo(COR_CROMO_2())),
-            linha_horizontal()
-        ]
-        .into()
+                .align_x(Align::End)
+                .padding(Padding {
+                    top: 8.0,
+                    right: 22.0,
+                    bottom: 0.0,
+                    left: 0.0,
+                })
+                .into(),
+        )
     }
 
     /// Diferença contra o último commit, em linha (como o modo inline do VS Code).
@@ -3757,12 +3822,13 @@ impl Code {
     }
 
     fn status_view(&self) -> Element<'_, Msg> {
-        let (pos, lingua) = match self.aba() {
+        let (pos, lingua, recuo) = match self.aba() {
             Some(a) => {
                 let (l, c) = a.conteudo.cursor();
-                (format!("Ln {l}, Col {c}"), linguagem(&a.caminho))
+                let recuo = edicao::detectar_recuo(&a.conteudo).to_string();
+                (format!("Ln {l}, Col {c}"), linguagem(&a.caminho), recuo)
             }
-            None => (String::new(), String::new()),
+            None => (String::new(), String::new(), String::new()),
         };
         let esquerda: Element<Msg> = if self.aviso.is_empty() {
             text(if self.inicio {
@@ -3784,6 +3850,11 @@ impl Code {
                 esquerda,
                 horizontal_space(),
                 text(pos).size(11),
+                // Clicar mostra (ou esconde) os espaços e tabs no editor.
+                button(text(recuo).size(11).color(COR_TEXTO_MUTED()))
+                    .on_press(Msg::AlternarInvisiveis)
+                    .padding([0, 4])
+                    .style(|_, s| item_lista(false, s, 4.0)),
                 text("UTF-8").size(11),
                 text(lingua).size(11)
             ]
@@ -4180,6 +4251,12 @@ fn alca<'a>(d: Divisa) -> Element<'a, Msg> {
     mouse_area(espaco)
         .on_press(Msg::Redimensionar(Some(d)))
         .cursor_icon(cursor_da_divisa(d))
+        .into()
+}
+
+fn com_dica<'a>(e: Element<'a, Msg>, dica: &'static str) -> Element<'a, Msg> {
+    tooltip(e, dica, TooltipPosition::Bottom)
+        .style(tema::estilo_dica)
         .into()
 }
 

@@ -53,6 +53,70 @@ fn tirar_recuo(l: &str) -> usize {
     }
 }
 
+/// Como o arquivo recua as linhas: com tab ou com tantos espaços.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Recuo {
+    Tabs,
+    Espacos(usize),
+}
+
+impl Recuo {
+    /// O que o Tab põe e o Enter repete a cada nível.
+    pub fn unidade(self) -> String {
+        match self {
+            Recuo::Tabs => "\t".into(),
+            Recuo::Espacos(n) => " ".repeat(n),
+        }
+    }
+}
+
+impl std::fmt::Display for Recuo {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Recuo::Tabs => f.write_str("Tabs"),
+            Recuo::Espacos(n) => write!(f, "Espaços: {n}"),
+        }
+    }
+}
+
+/// Olha as primeiras linhas: mais linhas com tab, é tab; senão, o menor recuo em espaços
+/// (2, 4 ou 8; o que não decide fica 4).
+pub fn detectar_recuo(c: &Content) -> Recuo {
+    let (mut tabs, mut espacos, mut menor) = (0, 0, usize::MAX);
+    for i in 1..=c.line_count().min(400) {
+        let Some(l) = c.line(i) else { break };
+        if l.trim().is_empty() {
+            continue;
+        }
+        if l.starts_with('\t') {
+            tabs += 1;
+        } else {
+            let n = l.len() - l.trim_start_matches(' ').len();
+            if n > 0 {
+                espacos += 1;
+                menor = menor.min(n);
+            }
+        }
+    }
+    if tabs > espacos {
+        Recuo::Tabs
+    } else {
+        Recuo::Espacos(match menor {
+            2 | 8 => menor,
+            _ => 4,
+        })
+    }
+}
+
+/// O que o Enter escreve no cursor (`coluna` conta de 1): a quebra e o mesmo recuo da linha, mais
+/// um nível depois de `{`, `(`, `[` ou `:` (Python).
+pub fn quebra_com_recuo(linha: &str, coluna: usize, recuo: Recuo) -> String {
+    let antes: String = linha.chars().take(coluna.saturating_sub(1)).collect();
+    let atual: String = antes.chars().take_while(|c| *c == ' ' || *c == '\t').collect();
+    let mais = antes.trim_end().ends_with(['{', '(', '[', ':']);
+    format!("\n{atual}{}", if mais { recuo.unidade() } else { String::new() })
+}
+
 /// Marca de comentário de linha pela extensão: (abre, fecha).
 pub fn marca_comentario(arquivo: &Path) -> Option<(&'static str, &'static str)> {
     let ext = arquivo.extension()?.to_str()?.to_ascii_lowercase();
@@ -169,5 +233,24 @@ mod testes {
     #[test]
     fn linha_mais_curta_que_a_coluna_nao_quebra() {
         assert_eq!(comentar_linha("x", false, 4, ("// ", "")), "// x");
+    }
+
+    #[test]
+    fn enter_repete_o_recuo_e_sobe_um_nivel_depois_da_chave() {
+        let e4 = Recuo::Espacos(4);
+        assert_eq!(quebra_com_recuo("    let x = 1;", 15, e4), "\n    ");
+        assert_eq!(quebra_com_recuo("fn a() {", 9, e4), "\n    ");
+        assert_eq!(quebra_com_recuo("\tif x:", 7, Recuo::Tabs), "\n\t\t");
+        // Enter no meio do recuo não inventa espaço.
+        assert_eq!(quebra_com_recuo("        x", 3, e4), "\n  ");
+    }
+
+    #[test]
+    fn detecta_tabs_ou_espacos() {
+        let c = Content::with_text("fn a() {\n  x\n  y\n}\n");
+        assert_eq!(detectar_recuo(&c), Recuo::Espacos(2));
+        let c = Content::with_text("a:\n\tb\n\tc\n    d\n");
+        assert_eq!(detectar_recuo(&c), Recuo::Tabs);
+        assert_eq!(detectar_recuo(&Content::with_text("sem recuo\n")).to_string(), "Espaços: 4");
     }
 }
