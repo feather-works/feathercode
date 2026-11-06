@@ -170,6 +170,7 @@ impl Code {
                     ("Localizar no arquivo", "Ctrl+F"),
                     ("Substituir no arquivo", "Ctrl+H"),
                     ("Ir para a linha", "Ctrl+G"),
+                    ("Aceitar a sugestão do autocompletar", "Tab ou Enter"),
                     ("Desfazer", "Ctrl+Z"),
                     ("Refazer", "Ctrl+Y ou Ctrl+Shift+Z"),
                     ("Fechar configurações", "Esc"),
