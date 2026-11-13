@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-FeatherCode is a code editor for the FeatherWorks suite, written in Rust with `pelicano`, the suite's own UI library (from crates.io, 0.1.31; `feather-ui` v0.3.12, built on it, still pins it by git tag, so a `[patch]` at the end of `Cargo.toml` points that git source to the same crates.io version: one copy only). Claude Code runs in a side panel. Code, comments, UI text and commit messages are all in Portuguese (pt-BR). Keep it that way.
+FeatherCode is a code editor for the FeatherWorks suite, written in Rust with `pelicano`, the suite's own UI library (from crates.io, 0.1.34; `feather-ui` v0.3.16 uses the same crates.io pelicano, so the old `[patch]` in `Cargo.toml` is gone). Version 0.0.8 (12/11/2026) only brings pelicano 0.1.34: on a graphics card with no usable Vulkan/OpenGL (Intel HD 4000) the window is drawn by the CPU instead of the app closing. Release: `pacote/gerar.sh` → `.deb`, `.tar.gz`, `.exe`, `SHA256SUMS`; the tag is created by `gh release create`. Claude Code runs in a side panel. Code, comments, UI text and commit messages are all in Portuguese (pt-BR). Keep it that way.
 
 ## Commands
 
