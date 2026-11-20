@@ -110,7 +110,15 @@ impl Aba {
 
     fn salvar(&mut self) -> std::io::Result<()> {
         let texto = self.conteudo.text();
-        std::fs::write(&self.caminho, &texto)?;
+        // Mudou no disco desde a última leitura (git checkout no terminal, outro editor): não passa
+        // por cima calado. A faixa amarela deixa escolher; "Ficar com a minha" libera o próximo salvar.
+        if let Ok(d) = std::fs::read_to_string(&self.caminho) {
+            if marca_texto(&d) != self.disco && d.trim_end() != texto.trim_end() {
+                self.conflito = true;
+                return Err(std::io::Error::other("o arquivo mudou no disco; escolha na faixa amarela"));
+            }
+        }
+        gravar_inteiro(&self.caminho, &texto)?;
         self.salvo = self.conteudo.version();
         self.disco = marca_texto(&texto);
         self.conflito = false;
@@ -131,6 +139,27 @@ impl Aba {
             Some("md" | "markdown")
         )
     }
+}
+
+/// Grava num arquivo ao lado e troca de uma vez: queda de energia ou disco cheio no meio não deixa
+/// o arquivo pela metade. Link simbólico grava no alvo; as permissões (script executável) ficam.
+fn gravar_inteiro(caminho: &Path, texto: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let alvo = std::fs::canonicalize(caminho).unwrap_or_else(|_| caminho.to_path_buf());
+    let nome = alvo.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let temp = alvo.with_file_name(format!(".{nome}.feathercode-salvando"));
+    let gravar = || -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&temp)?;
+        f.write_all(texto.as_bytes())?;
+        f.sync_all()?;
+        if let Ok(m) = std::fs::metadata(&alvo) {
+            std::fs::set_permissions(&temp, m.permissions())?;
+        }
+        std::fs::rename(&temp, &alvo)
+    };
+    gravar().inspect_err(|_| {
+        let _ = std::fs::remove_file(&temp);
+    })
 }
 
 /// Marca curta de um texto, para comparar com o disco sem guardar uma cópia.
@@ -4580,6 +4609,14 @@ mod testes {
         let _ = code.update(Msg::Confirmado(Some(false)));
         assert_eq!(code.abas.len(), 1);
         assert_eq!(std::fs::read_to_string(&a).unwrap(), "do agente");
+        // Mudou fora do app (sem passar pelo agente): salvar não passa por cima, marca o conflito.
+        code.abas[0].conteudo.insert("x");
+        std::fs::write(&b, "do git").unwrap();
+        assert!(code.abas[0].salvar().is_err() && code.abas[0].conflito);
+        assert_eq!(std::fs::read_to_string(&b).unwrap(), "do git");
+        let _ = code.update(Msg::ManterMinha);
+        code.abas[0].salvar().unwrap();
+        assert_ne!(std::fs::read_to_string(&b).unwrap(), "do git");
         assert!(code.aplicar_nome(&PedirNome::NovoArquivo(pasta.clone()), "../fora.txt").is_err());
         assert!(code.aplicar_nome(&PedirNome::Renomear(b.clone()), "a.txt").is_err());
         assert_eq!(
