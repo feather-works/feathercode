@@ -175,7 +175,12 @@ fn ler_para_editar(p: &Path) -> std::io::Result<String> {
             MAIOR_ARQUIVO >> 20
         )));
     }
-    std::fs::read_to_string(p)
+    std::fs::read_to_string(p).map_err(|e| match e.kind() {
+        std::io::ErrorKind::InvalidData => std::io::Error::other(
+            "não está em UTF-8 (é binário ou outra codificação, como Latin-1/Windows-1252)",
+        ),
+        _ => e,
+    })
 }
 
 /// Marca curta de um texto, para comparar com o disco sem guardar uma cópia.
@@ -4568,6 +4573,15 @@ fn rolagem<'a>(conteudo: impl Into<Element<'a, Msg>>) -> pelicano::Scrollable<'a
 
 #[cfg(test)]
 mod testes {
+    #[test]
+    fn arquivo_fora_do_utf8_explica_em_portugues() {
+        let p = std::env::temp_dir().join(format!("feathercode-latin1-{}.txt", std::process::id()));
+        std::fs::write(&p, b"Fun\xe7\xe3o").unwrap();
+        let erro = super::ler_para_editar(&p).unwrap_err().to_string();
+        let _ = std::fs::remove_file(&p);
+        assert!(erro.contains("UTF-8") && erro.contains("Latin-1"), "{erro}");
+    }
+
     #[test]
     fn novo_arquivo_cria_vazio_e_nao_esvazia_o_que_ja_existe() {
         use super::*;
