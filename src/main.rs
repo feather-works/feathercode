@@ -88,6 +88,8 @@ struct Aba {
     previa: bool,
     /// Em que lado do editor dividido a aba aparece: 1 = esquerda, 2 = direita, 3 = nos dois.
     grupos: u8,
+    /// O arquivo abriu todo com quebra do Windows (`\r\n`): a linha nova (Enter) sai igual ao salvar.
+    crlf: bool,
 }
 
 impl Aba {
@@ -101,6 +103,7 @@ impl Aba {
             conflito: false,
             previa: false,
             grupos: 1,
+            crlf: so_crlf(texto),
         }
     }
 
@@ -109,7 +112,10 @@ impl Aba {
     }
 
     fn salvar(&mut self) -> std::io::Result<()> {
-        let texto = self.conteudo.text();
+        let mut texto = self.conteudo.text();
+        if self.crlf {
+            texto = em_crlf(&texto);
+        }
         // Mudou no disco desde a última leitura (git checkout no terminal, outro editor): não passa
         // por cima calado. A faixa amarela deixa escolher; "Ficar com a minha" libera o próximo salvar.
         if let Ok(d) = std::fs::read_to_string(&self.caminho) {
@@ -181,6 +187,26 @@ fn ler_para_editar(p: &Path) -> std::io::Result<String> {
         ),
         _ => e,
     })
+}
+
+/// Todas as quebras são `\r\n` (e há pelo menos uma): o arquivo é do Windows.
+fn so_crlf(t: &str) -> bool {
+    let n = t.matches('\n').count();
+    n > 0 && t.matches("\r\n").count() == n
+}
+
+/// O texto com toda quebra `\n` sozinha trocada por `\r\n` (as que já são `\r\n` ficam).
+fn em_crlf(t: &str) -> String {
+    let mut s = String::with_capacity(t.len() + t.len() / 32);
+    let mut anterior = '\0';
+    for c in t.chars() {
+        if c == '\n' && anterior != '\r' {
+            s.push('\r');
+        }
+        s.push(c);
+        anterior = c;
+    }
+    s
 }
 
 /// Marca curta de um texto, para comparar com o disco sem guardar uma cópia.
@@ -4573,6 +4599,12 @@ fn rolagem<'a>(conteudo: impl Into<Element<'a, Msg>>) -> pelicano::Scrollable<'a
 
 #[cfg(test)]
 mod testes {
+    #[test]
+    fn arquivo_do_windows_continua_todo_em_crlf() {
+        assert!(super::so_crlf("a\r\nb\r\n") && !super::so_crlf("a\r\nb\n") && !super::so_crlf("sem quebra"));
+        assert_eq!(super::em_crlf("a\r\nb\nc\n"), "a\r\nb\r\nc\r\n");
+    }
+
     #[test]
     fn arquivo_fora_do_utf8_explica_em_portugues() {
         let p = std::env::temp_dir().join(format!("feathercode-latin1-{}.txt", std::process::id()));
