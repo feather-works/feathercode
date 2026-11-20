@@ -162,6 +162,22 @@ fn gravar_inteiro(caminho: &Path, texto: &str) -> std::io::Result<()> {
     })
 }
 
+/// Acima disto o editor fica lento e a leitura trava a janela (log de centenas de MB).
+const MAIOR_ARQUIVO: u64 = 20 << 20;
+
+/// O texto do arquivo, recusando o grande demais antes de ler.
+fn ler_para_editar(p: &Path) -> std::io::Result<String> {
+    let tamanho = std::fs::metadata(p)?.len();
+    if tamanho > MAIOR_ARQUIVO {
+        return Err(std::io::Error::other(format!(
+            "tem {} MB, e o editor abre até {} MB (para log grande, use o FeatherNotes)",
+            tamanho >> 20,
+            MAIOR_ARQUIVO >> 20
+        )));
+    }
+    std::fs::read_to_string(p)
+}
+
 /// Marca curta de um texto, para comparar com o disco sem guardar uma cópia.
 fn marca_texto(t: &str) -> u64 {
     use std::hash::{Hash, Hasher};
@@ -2001,7 +2017,7 @@ impl Code {
             Msg::Alternar(p) => self.arvore.alternar(&p),
             Msg::ReabrirArquivo(p) => {
                 if !self.abas.iter().any(|a| a.caminho == p) {
-                    if let Ok(t) = std::fs::read_to_string(&p) {
+                    if let Ok(t) = ler_para_editar(&p) {
                         self.abas.push(Aba::nova(p, &t));
                     }
                 }
@@ -2012,7 +2028,7 @@ impl Code {
                     self.abas[i].grupos |= self.bit();
                     self.ativa = i;
                 } else {
-                    match std::fs::read_to_string(&p) {
+                    match ler_para_editar(&p) {
                         Ok(t) => {
                             self.config.usar_arquivo(p.clone());
                             let mut aba = Aba::nova(p, &t);
