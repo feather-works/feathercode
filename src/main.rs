@@ -429,6 +429,8 @@ enum Msg {
     RecolherArvore,
     PastaEscolhida(Option<PathBuf>),
     Alternar(PathBuf),
+    /// Aba da última sessão na pasta: abre sem passar pelos arquivos recentes.
+    ReabrirArquivo(PathBuf),
     AbrirArquivo(PathBuf),
     TrocarAba(usize),
     FecharAba(usize),
@@ -1127,7 +1129,9 @@ impl Code {
             self.config.gravar();
             return Task::none();
         }
+        self.lembrar_abas();
         self.config.usar_pasta(p.clone());
+        let reabrir: Vec<PathBuf> = self.config.pastas.first().map(|r| r.abas.clone()).unwrap_or_default();
         self.ramo = ramo(&p);
         // Os terminais da pasta anterior fecham; um shell novo já abre na pasta nova.
         self.terminais = terminal::Terminais::default();
@@ -1154,7 +1158,20 @@ impl Code {
         self.outros_chats.clear();
         self.chat = Chat::novo(self.proximo_chat, self.chat.provedor, self.chat.modo);
         self.proximo_chat += 1;
-        Task::none()
+        // As abas da última vez nesta pasta (as que ainda existem).
+        Task::batch(reabrir.into_iter().filter(|a| a.is_file()).map(|a| Task::done(Msg::ReabrirArquivo(a))))
+    }
+
+    /// Guarda nos recentes as abas abertas da pasta atual, para reabrir na próxima vez.
+    fn lembrar_abas(&mut self) {
+        let raiz = self.arvore.raiz.clone();
+        let abas: Vec<PathBuf> = self.abas.iter().map(|a| a.caminho.clone()).filter(|c| c.starts_with(&raiz)).collect();
+        if let Some(r) = self.config.pastas.iter_mut().find(|r| r.caminho == raiz) {
+            if r.abas != abas {
+                r.abas = abas;
+                self.config.gravar();
+            }
+        }
     }
 
     /// O bit do lado com o foco em `Aba::grupos`.
@@ -1348,6 +1365,7 @@ impl Code {
                                 return Task::none();
                             }
                         }
+                        self.lembrar_abas();
                         return Task::window(WindowCmd::Close);
                     }
                     Confirmar::Excluir(p) => self.excluir(&p),
@@ -1981,6 +1999,13 @@ impl Code {
                 self.todos_arquivos.clear();
             }
             Msg::Alternar(p) => self.arvore.alternar(&p),
+            Msg::ReabrirArquivo(p) => {
+                if !self.abas.iter().any(|a| a.caminho == p) {
+                    if let Ok(t) = std::fs::read_to_string(&p) {
+                        self.abas.push(Aba::nova(p, &t));
+                    }
+                }
+            }
             Msg::AbrirArquivo(p) => {
                 self.diff = None;
                 if let Some(i) = self.abas.iter().position(|a| a.caminho == p) {
@@ -2371,7 +2396,10 @@ impl Code {
             Msg::Fechar if self.abas.iter().any(Aba::sujo) => {
                 self.confirmar = Some(Confirmar::Sair)
             }
-            Msg::Fechar => return Task::window(WindowCmd::Close),
+            Msg::Fechar => {
+                self.lembrar_abas();
+                return Task::window(WindowCmd::Close);
+            }
         }
         Task::none()
     }

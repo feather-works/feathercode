@@ -27,6 +27,8 @@ impl Tema {
 pub struct Recente {
     pub caminho: PathBuf,
     pub quando: u64,
+    /// Só das pastas: os arquivos que estavam abertos, para reabrir junto.
+    pub abas: Vec<PathBuf>,
 }
 
 pub struct Config {
@@ -76,6 +78,7 @@ impl Config {
                     Some(Recente {
                         caminho: caminho.into(),
                         quando: r["quando"].as_u64().unwrap_or(0),
+                        abas: r["abas"].as_array().into_iter().flatten().filter_map(|a| a.as_str().map(PathBuf::from)).collect(),
                     })
                 })
                 .collect()
@@ -111,7 +114,10 @@ impl Config {
         let Some(c) = caminho() else { return };
         let lista = |l: &[Recente]| {
             l.iter()
-                .map(|r| json!({"caminho": r.caminho, "quando": r.quando}))
+                .map(|r| match r.abas.is_empty() {
+                    true => json!({"caminho": r.caminho, "quando": r.quando}),
+                    false => json!({"caminho": r.caminho, "quando": r.quando, "abas": r.abas}),
+                })
                 .collect::<Vec<_>>()
         };
         let tema = match self.tema {
@@ -149,12 +155,14 @@ impl Config {
 }
 
 fn recente(lista: &mut Vec<Recente>, p: PathBuf) {
+    let abas = lista.iter().find(|x| x.caminho == p).map(|x| x.abas.clone()).unwrap_or_default();
     lista.retain(|x| x.caminho != p);
     lista.insert(
         0,
         Recente {
             caminho: p,
             quando: agora(),
+            abas,
         },
     );
     lista.truncate(MAX_RECENTES);
@@ -186,9 +194,13 @@ mod testes {
             .map(|c| Recente {
                 caminho: c.into(),
                 quando: 0,
+                abas: vec![],
             })
             .collect();
+        v[2].abas = vec!["c/x.rs".into()];
         recente(&mut v, "c".into());
+        // Voltar a uma pasta guarda as abas que ela tinha.
+        assert_eq!(v[0].abas, [PathBuf::from("c/x.rs")]);
         assert_eq!(
             v.iter()
                 .map(|r| r.caminho.to_str().unwrap())
